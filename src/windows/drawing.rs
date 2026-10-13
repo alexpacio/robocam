@@ -102,6 +102,7 @@ impl App {
                 .map(|(_, _, action)| *action);
             let active = match id {
                 ENABLE | 210 => self.enabled,
+                201 => !self.enabled,
                 BAR => self.config.profile().show_bar,
                 207 => self.click.drag_enabled(),
                 208 => self.click.scrolling() || self.click.selected() == ClickAction::Scroll,
@@ -178,13 +179,24 @@ impl App {
                     icon.number("3");
                 }
                 207 => {
-                    icon.mouse(1);
-                    icon.arrow(25, 37, 43, 37);
+                    icon.mouse(match self.click.drag_button() {
+                        MouseButton::Left => 1,
+                        MouseButton::Middle => 2,
+                        MouseButton::Right => 3,
+                    });
+                    icon.arrow(35, 33, 26, 33);
+                    icon.arrow(35, 33, 44, 33);
+                    icon.arrow(35, 33, 35, 24);
+                    icon.arrow(35, 33, 35, 42);
                 }
                 208 => {
-                    icon.mouse(2);
+                    icon.mouse(4);
                     icon.arrow(38, 23, 38, 7);
                     icon.arrow(38, 27, 38, 43);
+                }
+                211 => {
+                    icon.mouse(1);
+                    icon.number("SU");
                 }
                 _ => {}
             }
@@ -296,7 +308,7 @@ impl App {
                 right: map_x(x + w).clamp(0, width),
                 bottom: map_y(y + h).clamp(0, height),
             };
-            let tracked = frame.face_detected || !self.config.profile().track_face;
+            let tracked = frame.tracking_ready();
             outline_rectangle(
                 dc,
                 area,
@@ -322,7 +334,7 @@ impl App {
             };
             outline_rectangle(dc, region, WHITE, scale(1, dpi));
         }
-        if self.last_frame == 0 || (!frame.face_detected && self.config.profile().track_face) {
+        if self.last_frame == 0 || !frame.tracking_ready() {
             let banner = RECT {
                 left: 0,
                 top: (height - scale(24, dpi)).max(0),
@@ -342,33 +354,6 @@ impl App {
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
         }
-    }
-
-    pub(super) unsafe fn draw_feedback(&self) {
-        let mut paint: PAINTSTRUCT = zeroed();
-        let target = BeginPaint(self.feedback, &mut paint);
-        let mut rectangle: RECT = zeroed();
-        GetClientRect(self.feedback, &mut rectangle);
-        let width = rectangle.right;
-        let height = rectangle.bottom;
-        let margin = scale(2, self.dpi_for(self.feedback));
-        if let Some(surface) = BufferedDc::new(target, width, height) {
-            fill(surface.dc, rectangle, rgb(31, 48, 51));
-            let progress = self.click.progress().clamp(0.0, 1.0);
-            let amount = ((width - 2 * margin).max(0) as f32 * progress).round() as i32;
-            fill(
-                surface.dc,
-                RECT {
-                    left: margin,
-                    top: margin,
-                    right: margin + amount,
-                    bottom: (height - margin).max(margin),
-                },
-                rgb(56, 216, 181),
-            );
-            BitBlt(target, 0, 0, width, height, surface.dc, 0, 0, SRCCOPY);
-        }
-        EndPaint(self.feedback, &paint);
     }
 }
 
@@ -482,15 +467,32 @@ impl Outline {
     }
 
     unsafe fn mouse(&self, button: u8) {
-        self.round(12, 5, 22, 36, 16);
-        self.line(12, 19, 34, 19);
-        self.line(23, 6, 23, 18);
-        match button {
-            1 => self.circle(15, 10, 5, true),
-            2 => self.round(21, 12, 4, 11, 3),
-            3 => self.circle(27, 10, 5, true),
-            _ => {}
+        self.round(9, 4, 29, 40, 16);
+        self.line(19, 6, 19, 23);
+        self.line(28, 6, 28, 23);
+        self.line(10, 23, 37, 23);
+        let red = rgb(215, 35, 42);
+        let region = match button {
+            1 => Some((11, 8, 7, 13)),
+            2 => Some((21, 6, 6, 17)),
+            3 => Some((29, 8, 7, 13)),
+            _ => None,
+        };
+        if let Some((x, y, w, h)) = region {
+            let brush = CreateSolidBrush(red);
+            let old = SelectObject(self.dc, brush);
+            self.round(x, y, w, h, 3);
+            SelectObject(self.dc, old);
+            DeleteObject(brush);
         }
+        // The central button and wheel are distinct parts of the drawing.
+        let brush = CreateSolidBrush(if button == 4 { red } else { rgb(242, 242, 242) });
+        let old = SelectObject(self.dc, brush);
+        self.round(22, 10, 4, 9, 3);
+        SelectObject(self.dc, old);
+        DeleteObject(brush);
+        self.line(22, 13, 26, 13);
+        self.line(22, 16, 26, 16);
     }
 
     unsafe fn number(&self, number: &str) {

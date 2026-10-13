@@ -14,10 +14,11 @@ AppId={{5B6EA626-8D46-4733-857F-93F136759B53}
 AppName=robocam
 AppVersion={#AppVersion}
 AppPublisher=robocam contributors
-DefaultDirName={localappdata}\Programs\robocam
+DefaultDirName={autopf}\robocam
+UsePreviousAppDir=no
 DefaultGroupName=robocam
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 MinVersion=10.0.22000
@@ -41,13 +42,17 @@ Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
-; Share one startup entry with the application's General settings page.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "robocam"; ValueData: """{app}\robocam.exe"" --minimized"; Tasks: autostart; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "robocam"; Tasks: not autostart; Flags: deletevalue uninsdeletevalue
+; Elevated startup is registered as an interactive logon task by robocam.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "robocam"; Flags: deletevalue uninsdeletevalue
 
 [Icons]
-Name: "{group}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userprograms}\robocam\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"
+Name: "{userdesktop}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Flags: runhidden waituntilterminated runascurrentuser
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Flags: runhidden waituntilterminated runascurrentuser
 Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; RunOnceId: "RemoveStartupTask"; Flags: runhidden waituntilterminated

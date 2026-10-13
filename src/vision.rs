@@ -1,12 +1,13 @@
-//! Camera acquisition and the Enable Viacam style feature tracker.
+//! Camera acquisition and optical-flow feature tracking.
 //!
 //! The capture thread owns the camera. A second thread runs the comparatively
 //! expensive face detector, so detecting a face never stalls pointer tracking.
 //! Only the latest preview is retained; unconsumed motion is accumulated.
 //!
-//! Algorithm and defaults adapted from Enable Viacam's visionpipeline.cpp,
+//! Motion-tracking algorithms incorporate GPL-licensed contributions,
 //! Copyright (C) 2008-19 Cesar Mauri Loba / CREA Software Systems, GPL-3.0+.
 
+use crate::cameras::{self, CameraDevice, CameraPreference};
 use opencv::{
     core::{self, Mat, Point2f, Rect, Scalar, Size, TermCriteria, Vector},
     imgproc, objdetect,
@@ -35,7 +36,9 @@ static CAMERA_SESSION: Mutex<()> = Mutex::new(());
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionConfig {
     pub camera_index: i32,
+    pub camera: Option<CameraPreference>,
     pub track_face: bool,
+    pub stop_on_face_loss: bool,
     pub face_timeout_ms: u64,
     pub detection_interval_ms: u64,
     /// Normalized x, y, width, height in the mirrored preview.
@@ -46,7 +49,9 @@ impl Default for VisionConfig {
     fn default() -> Self {
         Self {
             camera_index: 0,
+            camera: None,
             track_face: true,
+            stop_on_face_loss: true,
             face_timeout_ms: 5_000,
             detection_interval_ms: 400,
             manual_area: [0.25, 0.35, 0.5, 0.3],
@@ -60,7 +65,7 @@ pub struct VisionFrame {
     pub height: usize,
     /// Tightly packed, mirrored RGB pixels. Camera data stays on this computer.
     pub rgb: Vec<u8>,
-    /// Displacement in eViacam units: twice the motion in a 320 x 240 image.
+    /// Displacement units: twice the motion in a 320 x 240 image.
     pub dx: f32,
     pub dy: f32,
     pub face_detected: bool,
@@ -74,8 +79,21 @@ pub struct VisionFrame {
     pub captured_at: Instant,
 }
 
+impl VisionFrame {
+    /// Pointer control, calibration and preview must agree about readiness.
+    /// A valid optical-flow target can remain usable without a classifier hit
+    /// when the selected profile disables classifier-based face-loss stopping.
+    pub fn tracking_ready(&self) -> bool {
+        self.tracking_valid && self.captured_at.elapsed() < Duration::from_millis(500)
+    }
+}
+
 #[derive(Debug)]
 pub enum VisionEvent {
+    Cameras {
+        devices: Vec<CameraDevice>,
+        selected: Option<CameraDevice>,
+    },
     Frame(VisionFrame),
     Error(String),
     Stopped,
@@ -83,6 +101,7 @@ pub enum VisionEvent {
 
 #[derive(Default)]
 struct Mailbox {
+    cameras: Option<(Vec<CameraDevice>, Option<CameraDevice>)>,
     frame: Option<VisionFrame>,
     pending_since: Option<Instant>,
     error: Option<String>,
@@ -157,6 +176,9 @@ impl VisionWorker {
 
     pub fn try_recv(&self) -> Option<VisionEvent> {
         let mut mailbox = self.mailbox.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((devices, selected)) = mailbox.cameras.take() {
+            return Some(VisionEvent::Cameras { devices, selected });
+        }
         if let Some(error) = mailbox.error.take() {
             return Some(VisionEvent::Error(error));
         }
@@ -296,14 +318,17 @@ fn detect_face(
         .max_by_key(|face| face.width * face.height))
 }
 
-fn open_camera(index: i32, stop: &AtomicBool) -> Result<videoio::VideoCapture, String> {
-    if index < 0 {
-        return Err("Choose a camera index of zero or greater.".into());
-    }
+fn open_camera(device: &CameraDevice, stop: &AtomicBool) -> Result<videoio::VideoCapture, String> {
     let mut errors = Vec::new();
     // DirectShow supports the familiar native camera settings dialog. Media
     // Foundation is a fallback for devices that do not expose DirectShow.
-    for backend in [videoio::CAP_DSHOW, videoio::CAP_MSMF] {
+    for (index, backend) in [
+        device.dshow_index.map(|index| (index, videoio::CAP_DSHOW)),
+        device.msmf_index.map(|index| (index, videoio::CAP_MSMF)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if stop.load(Ordering::Acquire) {
             return Err("Camera stopped".into());
         }
@@ -326,7 +351,8 @@ fn open_camera(index: i32, stop: &AtomicBool) -> Result<videoio::VideoCapture, S
         format!("\n{}", errors.join("\n"))
     };
     Err(format!(
-        "Could not open camera {index}. Check that it is connected, close other camera apps, and allow desktop camera access in Windows Settings > Privacy & security > Camera.{detail}"
+        "Could not open camera {}. Check that it is connected, close other camera apps, and allow desktop camera access in Windows Settings > Privacy & security > Camera.{detail}",
+        device.name
     ))
 }
 
@@ -340,7 +366,14 @@ fn run_camera(
     if stop.load(Ordering::Acquire) {
         return Ok(());
     }
-    let mut camera = open_camera(config.camera_index, stop)?;
+    if config.camera_index < 0 {
+        return Err("Choose a camera index of zero or greater.".into());
+    }
+    let devices = cameras::enumerate()?;
+    let selected = cameras::resolve(&devices, config.camera.as_ref()).cloned();
+    mailbox.lock().unwrap_or_else(|p| p.into_inner()).cameras =
+        Some((devices, selected.as_ref().ok().cloned()));
+    let mut camera = open_camera(&selected?, stop)?;
     let result = process_camera(&mut camera, &config, stop, settings, mailbox);
     let _ = camera.release();
     result
@@ -483,7 +516,8 @@ fn process_frame(
     let face_detected = last_seen.is_some_and(|seen| {
         now.duration_since(seen) <= Duration::from_millis(config.face_timeout_ms)
     });
-    let tracking_valid = tracker.points.len() >= 3 && (!config.track_face || face_detected);
+    let tracking_valid = tracker.points.len() >= 3
+        && (!config.track_face || !config.stop_on_face_loss || face_detected);
     // Reacquisition establishes a new reference. Never apply the displacement
     // measured while the pointer was disabled to the newly enabled pointer.
     if !tracking_valid || !tracker.was_tracking_valid {
@@ -784,6 +818,9 @@ mod tests {
                 Some(VisionEvent::Error(_)) => saw_error = true,
                 Some(VisionEvent::Stopped) => saw_stop = true,
                 Some(VisionEvent::Frame(_)) => panic!("invalid camera delivered a frame"),
+                Some(VisionEvent::Cameras { .. }) => {
+                    panic!("invalid camera should fail before enumeration")
+                }
                 None => thread::sleep(Duration::from_millis(5)),
             }
         }
@@ -851,7 +888,7 @@ mod tests {
         assert_eq!(tracker.track(&first, true).unwrap(), (0.0, 0.0));
 
         // Exercise the whole image pipeline too: mirroring reverses camera X,
-        // and the output scale follows eViacam's two units per camera pixel.
+        // and the output scale is two units per camera pixel.
         let mut first_bgr = Mat::default();
         let mut second_bgr = Mat::default();
         imgproc::cvt_color_def(&first, &mut first_bgr, imgproc::COLOR_GRAY2BGR).unwrap();
@@ -926,6 +963,46 @@ mod tests {
         .unwrap();
         assert!(reacquired.tracking_valid);
         assert_eq!((reacquired.dx, reacquired.dy), (0.0, 0.0));
+
+        // Robo keeps following valid features when the face classifier misses
+        // the face, but still stops if optical flow itself loses the target.
+        let robo_tracking = VisionConfig {
+            stop_on_face_loss: false,
+            ..auto
+        };
+        seen = None;
+        let without_face = process_frame(
+            &first_bgr,
+            &mut tracker,
+            &robo_tracking,
+            &None,
+            &mut requested,
+            &mut seen,
+            now + Duration::from_millis(132),
+            30.0,
+        )
+        .unwrap();
+        assert!(!without_face.face_detected);
+        assert!(without_face.tracking_valid);
+        assert!(without_face.tracking_ready());
+        assert!((without_face.dx - 4.0).abs() < 0.4);
+        assert!((without_face.dy - 2.0).abs() < 0.4);
+        let blank = Mat::new_rows_cols_with_default(HEIGHT, WIDTH, core::CV_8UC3, Scalar::all(0.0))
+            .unwrap();
+        let without_features = process_frame(
+            &blank,
+            &mut tracker,
+            &robo_tracking,
+            &None,
+            &mut requested,
+            &mut seen,
+            now + Duration::from_millis(165),
+            30.0,
+        )
+        .unwrap();
+        assert!(!without_features.tracking_valid);
+        assert!(!without_features.tracking_ready());
+        assert_eq!((without_features.dx, without_features.dy), (0.0, 0.0));
     }
 
     #[test]

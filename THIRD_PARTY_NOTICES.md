@@ -1,19 +1,14 @@
 # Third-party notices
 
-## eViacam
+## GPL-licensed motion and tracking contributions
 
-robocam is a Rust reimplementation informed by Enable Viacam (eViacam), including
-its pointer-motion and dwell-click behavior and interface dimensions.
+The motion and tracking implementation incorporates algorithmic work by Cesar
+Mauri Loba / CREA Software Systems and contributors, copyright 2008?2019,
+distributed under the GNU General Public License, version 3 or any later version.
 
-- Project: <https://github.com/cmauri/eviacam>
-- Audited revision: `a4032ed9c59def5399a93e74f5ea84513d2f42b1`
-- Copyright: Cesar Mauri Loba / CREA Software Systems and the eViacam contributors.
-- License: GNU General Public License, version 3 or any later version.
-
-robocam is distributed under GPL-3.0-or-later; the complete license is in
-`LICENSE`. The package contains a `robocam-<version>-source.zip` with the
-corresponding robocam sources and build scripts. eViacam's original icons and
-sounds are not included in robocam.
+robocam is distributed under GPL-3.0-or-later; the complete license is in `LICENSE`.
+Packages include corresponding robocam sources and build scripts. The icons are
+original artwork created for robocam.
 
 ## OpenCV and face detector
 

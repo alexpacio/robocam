@@ -1,7 +1,7 @@
 //! Deterministic, platform independent pointer and click state machines.
 //!
-//! The transfer curve and click selection rules follow eViacam's pointeraction,
-//! mousecontrol, dwellclick, gestureclick and clickwindowcontroller components.
+//! Pointer transfer, dwell timing, gesture recognition and click selection are
+//! deterministic and independent of the native interface.
 //! Native input injection belongs to the caller; every held button is released
 //! by `ClickEngine::reset`, including on face loss and disabling control.
 
@@ -94,7 +94,7 @@ impl MotionEngine {
         let y = axis(dy, self.previous.1, settings.speed_y, settings.reverse_y);
         self.previous = (x, y);
 
-        // eViacam uses a 30-entry acceleration table indexed by rounded length.
+        // Use a 30-entry acceleration table indexed by rounded length.
         let distance_index = (x.hypot(y).round() as u32).min(29);
         let factor = acceleration_factor(settings.acceleration.min(5), distance_index);
         let threshold = f32::from(settings.easy_stop.min(10));
@@ -198,10 +198,11 @@ pub enum ClickAction {
     Drag,
     Scroll,
     NoClick,
+    SketchUpEdit,
 }
 
 impl ClickAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::NoClick,
         Self::Left,
         Self::Double,
@@ -210,6 +211,7 @@ impl ClickAction {
         Self::Right,
         Self::Drag,
         Self::Scroll,
+        Self::SketchUpEdit,
     ];
 
     pub fn label(self) -> &'static str {
@@ -222,6 +224,7 @@ impl ClickAction {
             Self::Drag => "Drag",
             Self::Scroll => "Scroll",
             Self::NoClick => "No click",
+            Self::SketchUpEdit => "SketchUp: edit group/component",
         }
     }
 
@@ -244,6 +247,8 @@ pub enum MouseButton {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEvent {
+    /// Select tool (Space) followed by a paced double click at the same point.
+    SketchUpEdit,
     MoveTo(i32, i32),
     /// Count is 1, 2 or 3. The platform layer spaces multi-clicks appropriately.
     Click(MouseButton, u8),
@@ -308,6 +313,7 @@ pub struct ClickEngine {
     gesture: GestureState,
     previous_mode: Option<ClickMode>,
     previous_controls: bool,
+    last_dwell_duration_ms: Option<u64>,
 }
 
 impl Default for ClickEngine {
@@ -326,11 +332,16 @@ impl Default for ClickEngine {
             gesture: GestureState::Dwell,
             previous_mode: None,
             previous_controls: false,
+            last_dwell_duration_ms: None,
         }
     }
 }
 
 impl ClickEngine {
+    /// Time spent in the countdown which most recently produced an action.
+    pub fn last_dwell_duration_ms(&self) -> Option<u64> {
+        self.last_dwell_duration_ms
+    }
     pub fn selected(&self) -> ClickAction {
         if self.clicks_enabled {
             self.selected
@@ -350,6 +361,9 @@ impl ClickEngine {
     pub fn held_button(&self) -> Option<MouseButton> {
         self.held
     }
+    pub fn drag_button(&self) -> MouseButton {
+        self.drag_button
+    }
 
     pub fn scrolling(&self) -> bool {
         self.scrolling
@@ -364,7 +378,7 @@ impl ClickEngine {
     }
 
     /// A normal selection is used once; selecting it twice locks it. In fast
-    /// mode hovering selects once and clicking locks, as in eViacam.
+    /// mode hovering selects once and clicking locks the action.
     pub fn select(&mut self, action: ClickAction, fast_mode: bool) -> Vec<InputEvent> {
         if action == ClickAction::NoClick {
             let over_controls = self.previous_controls;
@@ -526,6 +540,7 @@ impl ClickEngine {
         if elapsed < dwell {
             return events;
         }
+        self.last_dwell_duration_ms = Some(elapsed);
         if over_controls {
             // Release a held button before interacting with the application's
             // controls, rather than accidentally dragging its window.
@@ -642,6 +657,7 @@ impl ClickEngine {
                 self.scrolling = true;
                 return;
             }
+            ClickAction::SketchUpEdit => events.push(InputEvent::SketchUpEdit),
             ClickAction::Drag | ClickAction::NoClick => return,
         }
         self.selected = self.locked;
@@ -776,6 +792,45 @@ mod tests {
     }
 
     #[test]
+    fn sketchup_edit_is_a_separate_one_shot_action() {
+        let mut engine = ClickEngine::default();
+        engine.select(ClickAction::SketchUpEdit, false);
+        assert!(tick(&mut engine, 0, (0, 0)).is_empty());
+        assert_eq!(
+            tick(&mut engine, 1000, (0, 0)),
+            vec![InputEvent::SketchUpEdit]
+        );
+        assert_eq!(engine.selected(), ClickAction::Left);
+    }
+
+    #[test]
+    fn robo_dwell_matches_expected_26_fps_timing() {
+        let mut engine = ClickEngine::default();
+        let settings = ClickSettings {
+            dwell_ms: 400,
+            tolerance_px: 2,
+            ..ClickSettings::default()
+        };
+        assert!(
+            engine
+                .update(0, (10, 0), (500, 500), true, true, false, &settings)
+                .is_empty()
+        );
+        let mut fired_at = None;
+        for frame in 1..=20 {
+            let time = frame * 38;
+            let events = engine.update(time, (0, 0), (500, 500), true, true, false, &settings);
+            if !events.is_empty() {
+                fired_at = Some(time);
+                break;
+            }
+        }
+        // The countdown fires on the first camera frame after 400 ms.
+        assert_eq!(fired_at, Some(418));
+        assert_eq!(engine.last_dwell_duration_ms(), Some(418));
+    }
+
+    #[test]
     fn dwell_fires_once_and_movement_rearms() {
         let mut engine = ClickEngine::default();
         assert!(tick(&mut engine, 0, (0, 0)).is_empty());
@@ -794,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn tolerance_uses_each_frame_displacement_like_eviacam() {
+    fn tolerance_uses_each_frame_displacement() {
         let mut engine = ClickEngine::default();
         tick(&mut engine, 0, (0, 0));
         tick(&mut engine, 500, (3, 0));

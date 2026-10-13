@@ -1,93 +1,100 @@
 # robocam
 
-robocam is a Windows 11 head-controlled mouse written in Rust, using native Win32
-windows and OpenCV face detection and optical-flow tracking. It follows eViacam's
-relative head-motion control and dwell-click behavior, with additional triple
-click, wheel scrolling and middle/right-button dragging.
+A Windows 11 head-controlled mouse written in Rust, with a native interface and
+OpenCV face detection and optical-flow tracking. Camera images stay on the PC.
 
-## Start using it
+## Install and start
 
-Run the installer from `dist`, or extract the portable ZIP and run `robocam.exe`.
-The installer includes the native runtime dependencies and needs no administrator
-account. **Start robocam when I sign in to Windows** is selected by default; it
-can be unchecked in setup or changed in the application's General settings.
+Run the installer from `dist`. It installs under `Program Files\robocam` and
+requests administrator permission so input can reach elevated desktop applications,
+including Task Manager and the Windows on-screen keyboard. Login startup is checked
+by default and uses a highest-privilege interactive task for the current user.
 
-Place your camera at eye level, ensure your face is well lit and visible, and
-follow the setup/calibration wizard. Allow desktop applications to access the
-camera in Windows **Settings → Privacy & security → Camera** if necessary.
+Normal launches request elevation. robocam sets its own process priority to
+**Realtime** and rechecks it each second. OpenCV parallelism is limited to one thread.
+Realtime is an aggressive scheduling class; it cannot prevent hardware/driver stalls
+and can reduce CPU time available to other applications.
 
-Control starts **paused** by default. Press **F11** or the enable button to start
-moving the pointer. Move your head gently left/right and up/down; hold it still
-over a target for the dwell interval (initially one second) to click. Press F11
-again to pause. Moving the physical mouse temporarily gives it priority.
+## Camera
 
-- **F11:** enable/pause head control.
-- **F10:** center the pointer.
-- **F9:** toggle workspace limits.
+Open **Configuration > Camera** to choose a device by name, then **Save**. The
+selection is saved per profile using device identity, so changing device order does
+not select the wrong camera. A missing saved camera is reported explicitly.
 
-The keys can be changed in configuration. The system tray menu brings back the
-main window and provides pause and exit. The keyboard button opens Windows'
-on-screen keyboard; another keyboard command can be configured.
-Optional arrow hotkeys adjust horizontal/vertical speed. General settings also
-provide a 0–50 ms delay between button events for applications that need it.
+With no saved camera, a single detected camera opens automatically; multiple cameras
+prompt for a choice. **Refresh cameras** updates the list. **Forget saved camera**
+selects automatic mode; press **Save** to apply the reset.
 
-## Click toolbar
+## Pointer and click toolbar
 
-The toolbar has separate controls for no-click, left, middle, right, double,
-triple, drag and scroll actions, plus showing the main window.
-The docked bar spans the monitor edge and reserves workspace, so maximized
-application windows remain below it. Its normal height is 52 logical pixels.
+Move your head to move the pointer and stop over a target to click. **Pause stops
+screen clicks only**: video and head-driven pointer movement continue. Dwell on
+**Play** to resume; other toolbar dwell actions are disabled while paused.
 
-Select a click type to use it once. Select the same temporary type again to keep
-it locked. In fast mode, hovering selects a temporary type and clicking locks it.
-**No click** pauses dwell clicking while pointer movement continues; selecting
-it again restores clicking.
+The toolbar fills the screen width, keeps buttons on the left and reserves desktop
+space so maximized windows do not overlap it. The order is:
 
-To drag, select the desired single button (left, middle or right), then **Drag**.
-The first dwell presses and holds that button. Move to the destination and stop
-again to release it. Drag stays active until that second dwell. Selecting a
-different mode, pausing or losing tracking releases any held button.
+1. Single left, double left, triple left.
+2. Drag (four-arrow cross), middle click, wheel scrolling.
+3. SketchUp group/component editing.
+4. Play/pause, no click, right click, main window.
+5. Keyboard, configuration, setup and help.
 
-For scrolling, select **Scroll**, dwell over the target to enter scrolling, then
-move your head vertically. Stop again to finish scrolling. Double and triple
-clicks always use the left button.
+Mouse icons have three buttons plus a central wheel; the relevant button/wheel is
+red. There is no floating cursor progress bar.
 
-Configuration controls dwell time, tolerance, consecutive clicking, click sound,
-visual feedback, normal/thin toolbar design and normal/fast selection. Motion
-controls include independent horizontal/vertical sensitivity, acceleration,
-smoothing, a motion threshold, workspace limits and wrapping. Profiles store
-separate settings for different users or setups.
+Select an action once to use it for the next click; select it again to lock it.
+Fast mode selects on hover and locks on activation. Drag applies to the selected
+single mouse button: dwell to hold, move, then dwell again to release. Wheel mode
+freezes the pointer while head motion scrolls; move and stop again to finish.
 
-## Camera and settings
+The **SketchUp** action uses Space to select the Select tool, then a paced double
+left click at the target. Use it over a group/component in the model viewport.
+It checks the target application and cancels pending input if focus changes.
+This uses SketchUp's [default shortcuts](https://help.sketchup.com/en/default-keyboard-shortcuts)
+and [group editing behavior](https://help.sketchup.com/en/sketchup/grouping-geometry).
 
-Open configuration to choose a camera, adjust tracking and configure the
-face-loss timeout. Automatic face detection initializes the tracking region;
-manual region selection is available in the video preview. Assisted calibration
-helps choose sensitivity for your comfortable range of motion.
+Default hotkeys are F11 (pause/resume clicks), F10 (center pointer) and F9 (workspace
+limits). They can be changed or disabled. Closing the main window hides it in the
+tray; use File > Exit or the tray menu to terminate.
 
-Settings are stored in `%APPDATA%\robocam\settings.json`. Uninstall keeps these
-profiles. Login startup launches with `--minimized`; whether pointer control is
-enabled on launch is a separate setting and remains off until you enable it.
+## Robo profile
 
-The application works locally: camera frames are processed on the computer and
-are not uploaded. **Check for updates** uses the latest stable release from
-[alexpacio/robocam on GitHub Releases](https://github.com/alexpacio/robocam/releases)
-via `https://api.github.com/repos/alexpacio/robocam/releases/latest`. It compares
-the release tag with the installed version and skips drafts and prereleases.
-The **Open GitHub Releases** button opens the new version's release page, or
-the repository's release list when no update is available or the check fails.
-The request sends the application version as its user agent; robocam never
-downloads or installs application code automatically. No update is offered
-until a release is published. Windows' secure desktop and applications running at a higher
-privilege level do not accept ordinary application input injection.
+The built-in **Robo** profile is available in new and upgraded configurations.
+Existing selections and customizations are preserved. It can be edited or copied
+with Save as; the built-in profile cannot be deleted.
 
-The interface offers **English and Italian**; change language in General and
-restart. The remainder of eViacam's translation catalogs have not been ported.
+| Setting | Robo |
+| --- | --- |
+| X / Y speed | 9 / 9 |
+| Acceleration / smoothing / movement sensitivity | 3 / 3 / 2 |
+| Workspace limits / wrapping | Off / off; margins stored as 1% |
+| Clicks enabled at startup | On |
+| Dwell / tolerance / consecutive clicks | 400 ms / 2 / off |
+| Click sound / physical mouse cooldown | Off / 0 ms |
+| Hotkeys | Disabled |
+| Keyboard / event delay | `osk.exe` / 0 ms |
+| Automatic face location / detection interval | On / 100 ms |
+| Stop on classifier face loss | Off; timeout stored as 5 seconds |
+
+Camera failure or loss of reliable optical-flow features always releases held
+buttons. Calibration and the live preview use the same tracking-readiness check
+as pointer movement. Movement pauses only during calibration measurements.
+
+Settings are stored in `%APPDATA%\robocam\settings.json`; uninstall retains them.
+The interface offers English and Italian.
+
+## Updates and privacy
+
+Check for updates uses [robocam GitHub Releases](https://github.com/alexpacio/robocam/releases)
+through `https://api.github.com/repos/alexpacio/robocam/releases/latest`. Stable tags
+are compared with the installed version. Open GitHub Releases opens the selected
+release page, or the releases list when no update is available. No executable is
+automatically downloaded or installed. Camera images are never uploaded.
 
 ## Build
 
-Install Rust (x64 MSVC), Visual Studio C++ build tools with the Windows SDK,
-LLVM/libclang and 7-Zip. Then run:
+Install Rust x64 MSVC, Visual Studio C++ build tools with Windows SDK, LLVM and 7-Zip.
 
 ```powershell
 .\scripts\bootstrap.ps1 -OpenCV -Installer
@@ -95,37 +102,10 @@ LLVM/libclang and 7-Zip. Then run:
 .\scripts\package.ps1 -SkipBuild
 ```
 
-This builds a tested release binary, a per-user installer, a portable ZIP,
-corresponding application source and checksums under `dist`. Native SDK and
-installer tools are extracted locally into `.tools` with pinned checksums.
-See [packaging.md](docs/packaging.md) for dependency overrides and details.
+The installer, portable ZIP, corresponding source and checksums are written to
+`dist`. For development, dot-source `scripts/build-env.ps1`, then run `cargo test`,
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check`.
+See [packaging](docs/packaging.md) and [behavior and verification](docs/behavior.md).
 
-Development tests can also be run with the native libraries on PATH:
-
-```powershell
-. .\scripts\build-env.ps1
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --all -- --check
-```
-
-The control-engine tests cover pointer transfer, dwell timing, selection/locking,
-drag release and wheel scrolling. Camera response, click behavior in individual
-applications, and monitor/DPI combinations still need manual validation on the
-target hardware; see [the compatibility checklist](docs/eviacam-parity.md).
-
-## Compatibility and license
-
-The [eViacam reference audit](docs/eviacam-parity.md) records upstream behaviors,
-exact icon dimensions and which settings are specific to its Linux interface.
-The normal click icons retain 48 × 48 logical pixels and main toolbar icons retain
-32 × 32; artwork is new. Additional actions extend the row of click buttons.
-
-This is an independent Rust application, not the original eViacam executable.
-The core control behavior is implemented, but the interface is a native rewrite:
-camera selection uses device indices, hotkey assignment uses function keys,
-and the on-screen keyboard setting takes an executable path. See the compatibility
-document for retained behavior and deliberate differences.
 The project is GPL-3.0-or-later. See [LICENSE](LICENSE) and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and dependency
-licenses. Packages include their corresponding robocam source archive.
+[third-party notices](THIRD_PARTY_NOTICES.md). Packages include corresponding source.

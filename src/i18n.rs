@@ -49,6 +49,11 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Click bar" => "Barra dei clic",
         "Help" => "Guida",
         "Check for updates…" => "Cerca aggiornamenti…",
+        "Robo is a built-in profile and cannot be deleted." => {
+            "Robo è un profilo integrato e non può essere eliminato."
+        }
+        "Face-loss timeout (100–59000 ms)" => "Attesa perdita del viso (100–59000 ms)",
+        "Stop pointer when face is not detected" => "Ferma il puntatore se il viso non è rilevato",
         "Open GitHub Releases" => "Apri le versioni su GitHub",
         "GitHub Releases: alexpacio/robocam" => "Versioni su GitHub: alexpacio/robocam",
         "Could not open your browser. Visit https://github.com/alexpacio/robocam/releases" => {
@@ -83,6 +88,32 @@ fn static_italian(text: &str) -> Option<&'static str> {
         }
         "Tracking" => "Controllo attivo",
         "Paused · F11 to enable" => "In pausa · F11 per attivare",
+        "Paused — use the enable button" => "In pausa — usa il pulsante di attivazione",
+        "Clicks paused — dwell on Play to resume" => {
+            "Click in pausa — soffermati su Play per riprendere"
+        }
+        "Automatic (ask when multiple)" => "Automatica (chiedi se più telecamere)",
+        "Unavailable" => "Non disponibile",
+        "Refresh cameras" => "Aggiorna telecamere",
+        "Forget saved camera" => "Dimentica telecamera",
+        "Multiple cameras detected. Choose a camera in Configuration and save the selection." => {
+            "Sono presenti più telecamere. Scegline una in Configurazione e salva la scelta."
+        }
+        "No cameras detected. Connect a camera and refresh the camera list in Configuration." => {
+            "Nessuna telecamera rilevata. Collegane una e aggiorna l'elenco in Configurazione."
+        }
+        "SketchUp: edit group/component" => "SketchUp: modifica gruppo/componente",
+        "Use the SketchUp button over a group or component in the SketchUp model view." => {
+            "Usa il pulsante SketchUp su un gruppo o componente nell'area del modello di SketchUp."
+        }
+        "Head tracking ready" => "Tracciamento della testa pronto",
+        "Waiting for reliable head tracking…" => "In attesa del tracciamento della testa…",
+        "Wait until head tracking is ready in the preview before starting." => {
+            "Attendi che il tracciamento della testa sia pronto nell'anteprima prima di iniziare."
+        }
+        "Ready\n\nYour pointer speeds have been adjusted.\n\nUse the enable button to start or pause head control. Move your head to move the pointer; hold still to click.\n\nYou can tune speed, smoothing and dwell time in Configuration at any time." => {
+            "Pronto\n\nLa velocità del puntatore è stata regolata.\n\nUsa il pulsante di attivazione per avviare o sospendere il controllo. Muovi la testa per spostare il puntatore; fermati per fare clic.\n\nPuoi regolare velocità, levigatezza e tempo di sosta in Configurazione."
+        }
         "Show main window" => "Mostra finestra principale",
         "Open robocam" => "Apri robocam",
         "robocam click bar" => "robocam — Barra dei clic",
@@ -283,8 +314,8 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "To track a manual region, turn off automatic face location and drag a rectangle in the preview." => {
             "Per seguire un'area manualmente, disattiva il rilevamento automatico del viso e traccia un rettangolo nell'anteprima."
         }
-        "Adapted from Enable Viacam by Cesar Mauri Loba and contributors. GPL-3.0-or-later. Camera processing stays on this computer." => {
-            "Adattato da Enable Viacam di Cesar Mauri Loba e collaboratori. GPL-3.0-or-later. Le immagini della videocamera vengono elaborate su questo computer."
+        "Includes GPL-3.0-or-later contributions by Cesar Mauri Loba and contributors. Camera processing stays on this computer." => {
+            "Include contributi GPL-3.0-or-later di Cesar Mauri Loba e collaboratori. Le immagini della videocamera vengono elaborate su questo computer."
         }
         "See README and THIRD_PARTY_NOTICES in the installation directory." => {
             "Consulta README e THIRD_PARTY_NOTICES nella cartella di installazione."
@@ -299,6 +330,10 @@ fn formatted_italian(text: &str) -> Cow<'_, str> {
     // Translate only known wrappers; diagnostic details and user data stay intact.
     for (prefix, replacement) in [
         ("Tracking · ", "Controllo attivo · "),
+        (
+            "Clicks paused — dwell on Play to resume · ",
+            "Click in pausa — soffermati su Play · ",
+        ),
         (
             "Paused · F11 to enable · ",
             "In pausa · F11 per attivare · ",

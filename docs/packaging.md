@@ -28,18 +28,18 @@ pinned compiler. `-InnoCompiler` selects an explicit executable.
 
 Outputs in `dist`:
 
-- `robocam-<version>-windows-x64-setup.exe`: per-user Windows 11 installer.
+- `robocam-<version>-windows-x64-setup.exe`: Windows 11 installer.
 - `robocam-<version>-windows-x64.zip`: portable folder with app-local DLLs.
 - `robocam-<version>-source.zip`: the exact application source snapshot.
 - `SHA256SUMS.txt`: checksums for these three artifacts.
 
 The installer targets Windows build 22000 or later and installs under
-`%LOCALAPPDATA%\Programs\robocam`. It does not request administrator privileges.
+`%ProgramFiles%\robocam`. It requests administrator privileges.
 The **Start robocam when I sign in to Windows** task is checked by default and
-creates the `robocam` value in the current user's `Software\Microsoft\Windows\CurrentVersion\Run`
-registry key with `--minimized`. The application uses the same entry for its
-startup setting. Unchecking this task on an upgrade removes the previous entry.
-Uninstall removes the entry and
+registers a `robocam-<user SID>` interactive logon task with highest privileges
+and `--minimized`. The application uses the same task for its startup setting.
+The obsolete unelevated Run entry is removed. Unchecking startup removes the task.
+Uninstall removes the task and
 installed program files; application-created user profiles are retained.
 
 The installer and portable folder bundle OpenCV's world DLL, Media Foundation
@@ -55,6 +55,18 @@ GitHub releases and hardware-based camera acceptance are separate release steps.
 The application checks `alexpacio/robocam` GitHub releases when requested; a 404
 means that no public release has been published yet.
 
+For remote diagnostics, `--paused --diagnostic-report <path> --exit-after-ms 15000`
+runs the real camera and interface for 15 seconds with desktop clicks paused;
+head-driven pointer movement remains active.
+The JSON report records frame rate, tracking validity, input delivery and AppBar
+geometry; it contains no camera images. Omit the time limit for an ongoing session.
+`--export-default-settings <path>` writes the built-in profile configuration
+without opening the camera or interface.
+`--list-cameras <path>` writes device names, stable identities and backend indices.
+`--configure-startup enable|disable` manages elevated login startup.
+Normal operation requests elevation and maintains Realtime priority; diagnostic
+reports include the actual elevation state and Windows priority class.
+
 Installer behavior follows Inno Setup's
-[non-administrative mode](https://jrsoftware.org/ishelp/topic_admininstallmode.htm)
+[administrative installation mode](https://jrsoftware.org/ishelp/topic_admininstallmode.htm)
 and [task selection](https://jrsoftware.org/ishelp/topic_taskssection.htm).

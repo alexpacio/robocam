@@ -1,13 +1,18 @@
 //! Native Win32 UI and input boundary. The camera never injects input itself.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod camera_options;
 mod drawing;
 mod messages;
+mod runtime;
+mod sketchup;
+mod startup;
 
 use crate::updates::{self, UpdateResult};
 use crate::{
+    cameras::{self, CameraDevice, CameraPreference},
     engine::*,
-    settings::{Profile, Settings},
+    settings::{Profile, ROBO_PROFILE_NAME, Settings},
     vision::*,
 };
 use std::{
@@ -56,6 +61,8 @@ const NEXT: u16 = 320;
 const CAMERA_SETTINGS: u16 = 321;
 const RESET: u16 = 322;
 const UPDATES: u16 = 323;
+const REFRESH_CAMERAS: u16 = 324;
+const FORGET_CAMERA: u16 = 325;
 const INPUT_TAG: usize = 0x524F424F;
 const SS_OWNERDRAW: u32 = 13;
 const SS_NOTIFY: u32 = 0x100;
@@ -64,7 +71,6 @@ static PHYSICAL_INPUT: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
     static MAIN_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
-    static FEEDBACK_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
     static APPBAR_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
     static APPBAR_POSITIONING: Cell<bool> = const { Cell::new(false) };
     static APPBAR_PENDING: Cell<bool> = const { Cell::new(false) };
@@ -84,7 +90,7 @@ impl Drop for CallbackGuard {
     }
 }
 
-const BAR_ACTIONS: [(u16, &str, ClickAction); 8] = [
+const BAR_ACTIONS: [(u16, &str, ClickAction); 9] = [
     (201, "No click", ClickAction::NoClick),
     (202, "Left click", ClickAction::Left),
     (203, "Middle click", ClickAction::Middle),
@@ -93,6 +99,29 @@ const BAR_ACTIONS: [(u16, &str, ClickAction); 8] = [
     (206, "Triple click", ClickAction::Triple),
     (207, "Drag", ClickAction::Drag),
     (208, "Scroll", ClickAction::Scroll),
+    (
+        211,
+        "SketchUp: edit group/component",
+        ClickAction::SketchUpEdit,
+    ),
+];
+
+const BAR_BUTTONS: [(u16, &str); 15] = [
+    (202, "Left click"),
+    (205, "Double click"),
+    (206, "Triple click"),
+    (207, "Drag"),
+    (203, "Middle click"),
+    (208, "Scroll"),
+    (211, "SketchUp: edit group/component"),
+    (210, "Enable / pause"),
+    (201, "No click"),
+    (204, "Right click"),
+    (209, "Show main window"),
+    (KEYBOARD, "Keyboard"),
+    (OPTIONS, "Configuration"),
+    (WIZARD, "Setup"),
+    (HELP, "Help"),
 ];
 
 fn wide(s: &str) -> Vec<u16> {
@@ -126,7 +155,6 @@ struct App {
     bar: HWND,
     options: HWND,
     wizard: HWND,
-    feedback: HWND,
     font: HFONT,
     icon: HICON,
     mouse_hook: HHOOK,
@@ -134,6 +162,10 @@ struct App {
     motion: MotionEngine,
     click: ClickEngine,
     camera: Option<VisionWorker>,
+    camera_devices: Vec<CameraDevice>,
+    camera_choices: Vec<Option<CameraPreference>>,
+    camera_discovery: Option<Receiver<Result<Vec<CameraDevice>, String>>>,
+    active_camera: Option<CameraDevice>,
     frame: Option<VisionFrame>,
     last_frame: u64,
     enabled: bool,
@@ -168,16 +200,68 @@ struct App {
     logical_children: Vec<(HWND, HWND, [i32; 4])>,
     bar_size: [i32; 2],
     bar_visual_state: Option<BarVisualState>,
+    diagnostic_path: Option<std::path::PathBuf>,
+    diagnostic_written_ms: u64,
+    frames_received: u64,
+    input_sent: Cell<u64>,
+    input_failed: Cell<u64>,
+    exit_after_ms: Option<u64>,
+    click_actions: u64,
+    last_click_dispatch_delay_ms: u64,
+    pending_target: Option<HWND>,
 }
 
 pub fn run() {
     unsafe {
         let args: Vec<String> = std::env::args().collect();
+        let argument = |name: &str| {
+            args.iter()
+                .position(|arg| arg == name)
+                .and_then(|index| args.get(index + 1))
+        };
+        if let Some(path) = argument("--export-default-settings") {
+            match serde_json::to_vec_pretty(&Settings::default())
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| std::fs::write(path, bytes).map_err(|error| error.to_string()))
+            {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("Could not export settings: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        if let Some(path) = argument("--list-cameras") {
+            let result = cameras::enumerate()
+                .and_then(|devices| serde_json::to_vec_pretty(&devices).map_err(|e| e.to_string()))
+                .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()));
+            if let Err(error) = result {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.iter().any(|s| s == "--version") {
             return;
         }
         let auto_close = args.iter().any(|s| s == "--smoke-test");
         let dry_run = auto_close || args.iter().any(|s| s == "--ui-test");
+        if let Some(mode) = argument("--configure-startup") {
+            if !matches!(mode.as_str(), "enable" | "disable") {
+                std::process::exit(2);
+            }
+            if let Err(error) = startup::configure(mode == "enable") {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        if !dry_run && !runtime::elevated() {
+            if let Err(error) = runtime::relaunch_elevated(&args) {
+                eprintln!("{error}");
+            }
+            return;
+        }
         let single = CreateMutexW(null(), 0, wide("Local\\robocam.SingleInstance").as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS && !dry_run {
             let previous = FindWindowW(wide(APP_CLASS).as_ptr(), wide("robocam").as_ptr());
@@ -244,7 +328,6 @@ pub fn run() {
             bar: null_mut(),
             options: null_mut(),
             wizard: null_mut(),
-            feedback: null_mut(),
             font,
             icon,
             mouse_hook: null_mut(),
@@ -252,6 +335,10 @@ pub fn run() {
             motion: MotionEngine::default(),
             click: ClickEngine::default(),
             camera: None,
+            camera_devices: Vec::new(),
+            camera_choices: Vec::new(),
+            camera_discovery: None,
+            active_camera: None,
             frame: None,
             last_frame: 0,
             enabled: false,
@@ -286,6 +373,15 @@ pub fn run() {
             logical_children: Vec::new(),
             bar_size: [561, 52],
             bar_visual_state: None,
+            diagnostic_path: argument("--diagnostic-report").map(std::path::PathBuf::from),
+            diagnostic_written_ms: 0,
+            frames_received: 0,
+            input_sent: Cell::new(0),
+            input_failed: Cell::new(0),
+            exit_after_ms: argument("--exit-after-ms").and_then(|value| value.parse().ok()),
+            click_actions: 0,
+            last_click_dispatch_delay_ms: 0,
+            pending_target: None,
         });
         let pointer = &mut *app as *mut App as *const c_void;
         let hwnd = CreateWindowExW(
@@ -312,28 +408,19 @@ pub fn run() {
         app.prepare_window(hwnd, 300, 300);
         app.create_main();
         app.create_bar();
-        app.feedback = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            class_name.as_ptr(),
-            wide("robocam dwell").as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            scale(52, app.dpi_for(hwnd)),
-            scale(10, app.dpi_for(hwnd)),
-            hwnd,
-            null_mut(),
-            instance,
-            pointer,
-        );
-        FEEDBACK_WINDOW.with(|window| window.set(app.feedback));
-        app.prepare_window(app.feedback, 52, 10);
         app.register_hotkeys();
         if !dry_run {
             app.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0);
         }
         app.tray(NIM_ADD);
-        app.enabled = app.config.enabled_at_startup && !dry_run;
+        if !dry_run && let Err(error) = runtime::ensure_realtime() {
+            message(hwnd, &error);
+        }
+        if !dry_run {
+            let _ = opencv::core::set_num_threads(1);
+        }
+        app.enabled =
+            app.config.startup_enabled() && !dry_run && !args.iter().any(|arg| arg == "--paused");
         if !dry_run {
             app.start_camera();
         }
@@ -383,6 +470,7 @@ pub fn run() {
         let _cleanup_guard = CallbackGuard::enter();
         remove_appbar(app.bar);
         app.release_all();
+        app.write_diagnostics(false);
         if let Some(camera) = app.camera.take() {
             camera.stop();
         }
@@ -438,17 +526,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     // Native parent painting synchronously sends WM_DRAWITEM for owner-drawn
     // children. Do not hold an App borrow/guard while DefWindowProc performs
     // that work: otherwise every child draw is deferred and briefly blank.
-    // Only the small dwell-feedback window paints directly from App state.
-    if msg == WM_PAINT && !FEEDBACK_WINDOW.with(|window| window.get() == hwnd) {
+    if msg == WM_PAINT {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
     // Shell notifications may arrive synchronously during registration and
     // resize. These helpers use only thread-local handles, never borrow App.
     if matches!(msg, WM_DESTROY | WM_NCDESTROY) {
         remove_appbar(hwnd);
-        if FEEDBACK_WINDOW.with(|window| window.get() == hwnd) {
-            FEEDBACK_WINDOW.with(|window| window.set(null_mut()));
-        }
     }
     if TASKBAR_CREATED.with(|message| message.get() != 0 && message.get() == msg)
         && MAIN_WINDOW.with(|window| window.get() == hwnd)
@@ -621,10 +705,6 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_DRAWITEM => {
             app.draw_item(&*(lp as *const DRAWITEMSTRUCT));
             1
-        }
-        WM_PAINT if hwnd == app.feedback => {
-            app.draw_feedback();
-            0
         }
         WM_SIZE if hwnd == app.hwnd => {
             app.layout_main();
@@ -1124,33 +1204,31 @@ impl App {
         let vertical = matches!(self.config.profile().bar_position, 2 | 3);
         let unit = if thin { 30 } else { 52 };
         let button = if thin { 76 } else { 48 };
-        let logo = if thin { 16 } else { 48 };
         let gap = if thin { 9 } else { 15 };
-        let leading = if vertical {
-            [2, 0, logo, logo]
-        } else {
-            [0, 2, logo, logo]
-        };
-        let enable = self.child(
-            self.bar,
-            "BUTTON",
-            "Enable / pause",
-            210,
-            BS_OWNERDRAW as u32,
-            leading,
-        );
-        self.tooltip(self.bar, enable, "Enable / pause");
-        let mut offset = logo + gap;
-        for (id, label, _) in BAR_ACTIONS {
-            let rect = if vertical {
-                [2, offset + 2, button, unit - 4]
+        let mut offset = 0;
+        for (id, label) in BAR_BUTTONS {
+            if matches!(id, 210 | 209 | KEYBOARD) {
+                offset += gap;
+            }
+            let title = if thin && id == 211 { "SketchUp" } else { label };
+            let width = if thin {
+                if vertical {
+                    160
+                } else {
+                    (crate::i18n::translate(title).chars().count() as i32 * 7 + 18).max(76)
+                }
             } else {
-                [offset + 2, 2, button, unit - 4]
+                button
+            };
+            let rect = if vertical {
+                [2, offset + 2, width, unit - 4]
+            } else {
+                [offset + 2, 2, width, unit - 4]
             };
             let control = self.child(
                 self.bar,
                 "BUTTON",
-                label,
+                title,
                 id,
                 if thin {
                     BS_PUSHBUTTON as u32
@@ -1160,31 +1238,12 @@ impl App {
                 rect,
             );
             self.tooltip(self.bar, control, label);
-            offset += if vertical { unit } else { button + 4 };
-            if id == 201 {
-                offset += gap;
-            }
+            offset += if vertical { unit } else { width + 4 };
         }
-        offset += gap;
-        let rect = if vertical {
-            [2, offset + 2, button, unit - 4]
-        } else {
-            [offset + 2, 2, button, unit - 4]
-        };
-        let show = self.child(
-            self.bar,
-            "BUTTON",
-            "Show main window",
-            209,
-            BS_OWNERDRAW as u32,
-            rect,
-        );
-        self.tooltip(self.bar, show, "Show main window");
-        offset += if vertical { unit } else { button + 4 };
         let (w, h) = if vertical {
-            ((button + 4).max(logo + 4), offset)
+            (if thin { 164 } else { button + 4 }, offset)
         } else {
-            (offset, unit.max(logo + 4))
+            (offset, unit)
         };
         self.bar_size = [w, h];
         self.position_bar();
@@ -1216,7 +1275,7 @@ impl App {
         }
         self.bar_visual_state = Some(state);
         if !self.bar.is_null() {
-            for id in 201..=210 {
+            for id in 201..=211 {
                 let control = GetDlgItem(self.bar, id);
                 if !control.is_null() {
                     InvalidateRect(control, null(), 0);
@@ -1350,7 +1409,9 @@ impl App {
         let p = self.config.profile();
         self.camera = Some(VisionWorker::start(VisionConfig {
             camera_index: p.camera_index,
+            camera: p.camera.clone(),
             track_face: p.track_face,
+            stop_on_face_loss: p.stop_on_face_loss,
             face_timeout_ms: p.face_timeout_ms,
             detection_interval_ms: p.detection_interval_ms,
             manual_area: p.manual_area,
@@ -1360,16 +1421,32 @@ impl App {
 
     unsafe fn tick(&mut self) {
         let time = now();
-        if self.auto_close && self.smoke_started.elapsed().as_secs_f32() > 2.0 {
+        if (self.auto_close && self.smoke_started.elapsed().as_secs_f32() > 2.0)
+            || self
+                .exit_after_ms
+                .is_some_and(|limit| self.smoke_started.elapsed().as_millis() >= u128::from(limit))
+        {
             self.destroy_owned(self.hwnd);
             return;
         }
         self.poll_updates();
+        self.poll_camera_discovery();
         let event = self.camera.as_ref().and_then(|camera| camera.try_recv());
         let mut displacement = None;
         if let Some(event) = event {
             match event {
+                VisionEvent::Cameras { devices, selected } => {
+                    self.set_camera_devices(devices);
+                    self.active_camera = selected.clone();
+                    if selected.is_none() && !self.dry_run {
+                        self.options_page = 2;
+                        self.open_options();
+                        SendMessageW(GetDlgItem(self.options, PAGE as i32), CB_SETCURSEL, 2, 0);
+                        self.show_options_page();
+                    }
+                }
                 VisionEvent::Frame(frame) => {
+                    self.frames_received += 1;
                     if self.frame.is_none() {
                         self.fit_camera_window(frame.width as i32, frame.height as i32);
                     }
@@ -1377,13 +1454,13 @@ impl App {
                         displacement = Some((frame.dx, frame.dy));
                         self.last_frame = time;
                     }
-                    self.status = if frame.face_detected || !self.config.profile().track_face {
+                    self.status = if frame.tracking_valid {
                         format!(
                             "{} · {:.0} fps · {} points",
                             if self.enabled {
                                 "Tracking"
                             } else {
-                                "Paused · F11 to enable"
+                                "Clicks paused — dwell on Play to resume"
                             },
                             frame.fps,
                             frame.tracked_points
@@ -1413,28 +1490,22 @@ impl App {
         let physical = PHYSICAL_INPUT.load(Ordering::Relaxed);
         let paused_by_mouse =
             physical > 0 && time.saturating_sub(physical) < self.config.profile().pause_on_mouse_ms;
-        let tracking = self.last_frame != 0
-            && time.saturating_sub(self.last_frame) < 500
-            && self.frame.as_ref().is_some_and(|f| f.tracking_valid);
+        let tracking = self.tracking_ready();
         if self.enabled && tracking && !paused_by_mouse {
-            while self
-                .pending_input
-                .front()
-                .is_some_and(|(due, _, _)| *due <= time)
-            {
-                let (_, button, down) = self.pending_input.pop_front().unwrap();
-                self.button(button, down);
-            }
-        } else if self.was_controlling || !self.pending_input.is_empty() {
+            self.flush_pending_input(time);
+        } else if (!tracking || paused_by_mouse)
+            && (self.was_controlling || !self.pending_input.is_empty())
+        {
             self.release_all();
         }
         let mut position = cursor();
-        let mut over_bar = self.inside_window(self.bar, position);
+        let calibrating = self.calibration_started > 0;
+        if calibrating {
+            let (dx, dy) = displacement.unwrap_or((0.0, 0.0));
+            self.calibrate_frame(dx, dy, tracking);
+        }
         if let Some((dx, dy)) = displacement {
-            if self.calibration_started > 0 {
-                self.calibrate_frame(dx, dy, tracking);
-            }
-            if self.enabled && tracking && !paused_by_mouse && self.calibration_started == 0 {
+            if tracking && !paused_by_mouse && !calibrating {
                 self.was_controlling = true;
                 let movement =
                     self.motion
@@ -1443,8 +1514,17 @@ impl App {
                     self.move_cursor(movement.position);
                     position = movement.position;
                 }
-                over_bar = self.inside_window(self.bar, position);
-                let bar_control = self.bar_control_at(position);
+                let main_play = !self.enabled
+                    && WindowFromPoint(POINT {
+                        x: position.0,
+                        y: position.1,
+                    }) == GetDlgItem(self.hwnd, ENABLE as i32);
+                let over_bar = self.inside_window(self.bar, position) || main_play;
+                let bar_control = if main_play {
+                    ENABLE
+                } else {
+                    self.bar_control_at(position)
+                };
                 if bar_control != self.hover_id
                     || movement.delta.0.abs().max(movement.delta.1.abs())
                         > self.config.profile().click.tolerance_px as i32
@@ -1455,21 +1535,23 @@ impl App {
                 }
                 if over_bar {
                     self.click.suspend_dwell();
-                    if self.config.profile().fast_bar
+                    if self.enabled
+                        && self.config.profile().fast_bar
                         && let Some((_, _, action)) =
                             BAR_ACTIONS.iter().find(|(id, _, _)| *id == bar_control)
                     {
                         self.click.hover(*action, true);
                     }
                     if bar_control != 0
+                        && (self.enabled || matches!(bar_control, 210 | ENABLE))
                         && !self.hover_done
                         && time.saturating_sub(self.hover_since)
                             >= self.config.profile().click.dwell_ms
                     {
                         self.hover_done = true;
-                        self.command(self.bar, bar_control, 0);
+                        self.command(if main_play { self.hwnd } else { self.bar }, bar_control, 0);
                     }
-                } else if self.pending_input.is_empty() {
+                } else if self.enabled && self.pending_input.is_empty() {
                     let delta = if self.click.scrolling() {
                         movement.unclamped_delta
                     } else {
@@ -1485,6 +1567,8 @@ impl App {
                         &self.config.profile().click,
                     );
                     self.dispatch(events);
+                } else if !self.enabled {
+                    self.click.suspend_dwell();
                 }
             } else {
                 self.motion.reset();
@@ -1494,7 +1578,7 @@ impl App {
                     self.release_all();
                 }
             }
-        } else if !tracking || !self.enabled || paused_by_mouse {
+        } else if !tracking || paused_by_mouse {
             if self.was_controlling {
                 self.release_all();
             }
@@ -1509,41 +1593,26 @@ impl App {
             set_text(GetDlgItem(self.hwnd, STATUS as i32), &self.status);
             self.last_status = self.status.clone();
         }
-        let progress = self.click.progress();
-        if self.config.profile().visual_feedback
-            && progress > 0.0
-            && self.enabled
-            && tracking
-            && !over_bar
-        {
-            let dpi = self.dpi_for(self.feedback);
-            SetWindowPos(
-                self.feedback,
-                HWND_TOPMOST,
-                position.0 + scale(18, dpi),
-                position.1 + scale(22, dpi),
-                scale(52, dpi),
-                scale(10, dpi),
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            InvalidateRect(self.feedback, null(), 0);
-        } else {
-            ShowWindow(self.feedback, SW_HIDE);
-        }
+        self.refresh_wizard_tracking();
         self.auto_hide_bar(position);
         self.refresh_bar_visuals();
+        if time.saturating_sub(self.diagnostic_written_ms) >= 1000 {
+            if !self.dry_run {
+                let _ = runtime::ensure_realtime();
+            }
+            self.diagnostic_written_ms = time;
+            self.write_diagnostics(true);
+        }
     }
 
     unsafe fn dispatch(&mut self, events: Vec<InputEvent>) {
         for event in events {
             match event {
+                InputEvent::SketchUpEdit => self.sketchup_edit(),
                 InputEvent::MoveTo(x, y) => self.move_cursor((x, y)),
                 InputEvent::Click(button, count) => {
-                    let spacing =
-                        self.config
-                            .profile()
-                            .event_delay_ms
-                            .max(if count > 1 { 20 } else { 0 });
+                    self.click_actions += 1;
+                    let spacing = self.config.profile().event_delay_ms;
                     let time = now();
                     for i in 0..count {
                         self.pending_input
@@ -1554,6 +1623,9 @@ impl App {
                             false,
                         ));
                     }
+                    // A zero-delay click should reach Windows in this frame,
+                    // without waiting for another WM_TIMER delivery.
+                    self.flush_pending_input(now());
                     if self.config.profile().click_sound {
                         MessageBeep(0xFFFF_FFFF);
                     }
@@ -1589,7 +1661,37 @@ impl App {
                 },
             },
         };
-        SendInput(1, &input, size_of::<INPUT>() as i32);
+        if SendInput(1, &input, size_of::<INPUT>() as i32) == 1 {
+            self.input_sent.set(self.input_sent.get() + 1);
+        } else {
+            self.input_failed.set(self.input_failed.get() + 1);
+        }
+    }
+
+    unsafe fn flush_pending_input(&mut self, time: u64) {
+        if self
+            .pending_target
+            .is_some_and(|target| GetForegroundWindow() != target)
+        {
+            self.release_all();
+            return;
+        }
+        while self
+            .pending_input
+            .front()
+            .is_some_and(|(due, _, _)| *due <= time)
+        {
+            let (due, button, down) = self.pending_input.pop_front().unwrap();
+            self.last_click_dispatch_delay_ms = now().saturating_sub(due);
+            self.button(button, down);
+        }
+        if self.pending_input.is_empty() {
+            self.pending_target = None;
+        }
+    }
+
+    fn tracking_ready(&self) -> bool {
+        self.last_frame != 0 && self.frame.as_ref().is_some_and(VisionFrame::tracking_ready)
     }
 
     unsafe fn move_cursor(&self, position: (i32, i32)) {
@@ -1610,6 +1712,56 @@ impl App {
         );
     }
 
+    unsafe fn write_diagnostics(&self, running: bool) {
+        let Some(path) = &self.diagnostic_path else {
+            return;
+        };
+        let mut bar: RECT = zeroed();
+        GetWindowRect(self.bar, &mut bar);
+        let mut monitor: MONITORINFO = zeroed();
+        monitor.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(
+            MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST),
+            &mut monitor,
+        );
+        let rectangle = |rect: RECT| [rect.left, rect.top, rect.right, rect.bottom];
+        let frame = self.frame.as_ref();
+        let report = serde_json::json!({
+            "process_id":GetCurrentProcessId(), "running":running,
+            "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
+            "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
+            "profile":self.config.active_profile, "enabled":self.enabled,
+            "camera":self.active_camera, "saved_camera":self.config.profile().camera,
+            "cameras_detected":self.camera_devices.len(),
+            "status":self.status, "frames_received":self.frames_received,
+            "fps":frame.map(|frame|frame.fps),
+            "face_detected":frame.is_some_and(|frame|frame.face_detected),
+            "tracking_valid":frame.is_some_and(|frame|frame.tracking_valid),
+            "tracked_points":frame.map(|frame|frame.tracked_points),
+            "last_frame_age_ms":frame.map(|frame|frame.captured_at.elapsed().as_millis() as u64),
+            "input_events_sent":self.input_sent.get(), "input_failures":self.input_failed.get(),
+            "configured_dwell_ms":self.config.profile().click.dwell_ms,
+            "last_dwell_duration_ms":self.click.last_dwell_duration_ms(),
+            "last_click_dispatch_delay_ms":self.last_click_dispatch_delay_ms,
+            "click_actions":self.click_actions,
+            "physical_mouse_pause_ms":self.config.profile().pause_on_mouse_ms,
+            "calibration_ready":self.tracking_ready(),
+            "bar_bounds":rectangle(bar), "monitor_bounds":rectangle(monitor.rcMonitor),
+            "work_area":rectangle(monitor.rcWork),
+            "bar_registered":APPBAR_WINDOW.with(|window|window.get()==self.bar),
+            "bar_visible":IsWindowVisible(self.bar)!=0,
+            "dpi":self.dpi_for(self.hwnd),
+        });
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&report)
+            && let Err(error) = std::fs::write(path, bytes)
+        {
+            eprintln!("Could not write diagnostic report: {error}");
+        }
+    }
+
     unsafe fn button(&mut self, button: MouseButton, down: bool) {
         let (index, flag) = match (button, down) {
             (MouseButton::Left, true) => (0, MOUSEEVENTF_LEFTDOWN),
@@ -1624,6 +1776,7 @@ impl App {
     }
 
     unsafe fn release_all(&mut self) {
+        self.pending_target = None;
         self.was_controlling = false;
         self.pending_input.clear();
         let events = self.click.reset();
@@ -1785,7 +1938,7 @@ impl App {
             return;
         }
         match id {
-            ENABLE | 210 => self.toggle(),
+            ENABLE | 210 | 201 => self.toggle(),
             OPTIONS => self.open_options(),
             KEYBOARD => {
                 if self.dry_run {
@@ -1822,7 +1975,7 @@ impl App {
                     "Center your face in the preview, enable, then move your head. Stop over a target to click. Select an action on the click bar; select it again to lock it.\n\n",
                     "Drag modifies the selected single-click button: stop to hold, move, then stop again to release. Scroll: stop to enter, move your head to scroll, stop again to leave. No click disables desktop clicks; the click bar remains accessible.\n\n",
                     "To track a manual region, turn off automatic face location and drag a rectangle in the preview.\n\n",
-                    "Adapted from Enable Viacam by Cesar Mauri Loba and contributors. GPL-3.0-or-later. Camera processing stays on this computer.\n",
+                    "Includes GPL-3.0-or-later contributions by Cesar Mauri Loba and contributors. Camera processing stays on this computer.\n",
                     "See README and THIRD_PARTY_NOTICES in the installation directory."
                 ),
             ),
@@ -1860,7 +2013,7 @@ impl App {
                     },
                 );
             }
-            201..=208 => {
+            202..=208 | 211 => {
                 if source == self.bar
                     && now().saturating_sub(PHYSICAL_INPUT.load(Ordering::Relaxed)) < 100
                     && self.was_controlling
@@ -1942,6 +2095,13 @@ impl App {
                 self.open_options();
             }
             DELETE_PROFILE => {
+                if self.config.active_profile == ROBO_PROFILE_NAME {
+                    message(
+                        self.options,
+                        "Robo is a built-in profile and cannot be deleted.",
+                    );
+                    return;
+                }
                 if self.config.profiles.len() == 1 {
                     message(self.options, "Keep at least one profile.");
                     return;
@@ -1963,6 +2123,13 @@ impl App {
                     camera.request_camera_settings();
                 }
             }
+            REFRESH_CAMERAS => {
+                self.camera_discovery = Some(cameras::discover());
+            }
+            FORGET_CAMERA => {
+                SendMessageW(GetDlgItem(self.options, 440), CB_SETCURSEL, 0, 0);
+            }
+            441 | 444 => self.update_camera_options(),
             RESET => {
                 self.release_all();
                 self.start_camera();
@@ -2109,16 +2276,9 @@ impl App {
             p.click.fast_gesture,
         );
         self.check(1, 5, 425, "Play a sound on click", p.click_sound);
-        self.check(
-            1,
-            6,
-            426,
-            "Show dwell progress by the pointer",
-            p.visual_feedback,
-        );
         self.edit(
             1,
-            7,
+            6,
             427,
             "Pause after physical mouse (ms)",
             p.pause_on_mouse_ms,
@@ -2141,13 +2301,27 @@ impl App {
         }
         self.note(1, 12, "Gesture: dwell, move in a direction, dwell again.");
 
-        self.edit(2, 0, 440, "Camera index (0 = default)", p.camera_index);
+        self.camera_choices.clear();
+        let label = self.child(self.options, "STATIC", "Camera", 0, 0, [20, 94, 125, 23]);
+        self.controls.push((label, 2));
+        let chooser = self.child(
+            self.options,
+            "COMBOBOX",
+            "",
+            440,
+            WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
+            [150, 90, 360, 260],
+        );
+        SendMessageW(chooser, CB_SETDROPPEDWIDTH, 480, 0);
+        self.controls.push((chooser, 2));
+        self.fill_camera_choices(p.camera.clone());
+        self.camera_discovery = Some(cameras::discover());
         self.check(2, 1, 441, "Locate face automatically", p.track_face);
         self.edit(
             2,
             2,
             442,
-            "Face-loss timeout (100–3000 ms)",
+            "Face-loss timeout (100–59000 ms)",
             p.face_timeout_ms,
         );
         self.edit(
@@ -2157,6 +2331,14 @@ impl App {
             "Face detection interval (50–2000 ms)",
             p.detection_interval_ms,
         );
+        self.check(
+            2,
+            4,
+            444,
+            "Stop pointer when face is not detected",
+            p.stop_on_face_loss,
+        );
+        self.update_camera_options();
         self.note(
             2,
             5,
@@ -2168,6 +2350,20 @@ impl App {
             "save, then drag a rectangle over your face in the preview.",
         );
         self.note(2, 8, "Use good front lighting and aim for at least 25 fps.");
+        for (id, label, x) in [
+            (REFRESH_CAMERAS, "Refresh cameras", 20),
+            (FORGET_CAMERA, "Forget saved camera", 268),
+        ] {
+            let button = self.child(
+                self.options,
+                "BUTTON",
+                label,
+                id,
+                WS_TABSTOP,
+                [x, 279, 242, 25],
+            );
+            self.controls.push((button, 2));
+        }
         self.note(
             2,
             9,
@@ -2259,7 +2455,7 @@ impl App {
             4,
             459,
             "Enable head control at startup",
-            self.config.enabled_at_startup,
+            self.config.startup_enabled(),
         );
         self.check(
             4,
@@ -2441,6 +2637,15 @@ impl App {
     unsafe fn checked(&self, id: u16) -> bool {
         SendMessageW(GetDlgItem(self.options, id as i32), BM_GETCHECK, 0, 0) == BST_CHECKED as isize
     }
+    unsafe fn update_camera_options(&self) {
+        let automatic = self.checked(441);
+        EnableWindow(GetDlgItem(self.options, 444), i32::from(automatic));
+        EnableWindow(
+            GetDlgItem(self.options, 442),
+            i32::from(automatic && self.checked(444)),
+        );
+        EnableWindow(GetDlgItem(self.options, 443), i32::from(automatic));
+    }
     unsafe fn selected(&self, id: u16) -> usize {
         SendMessageW(GetDlgItem(self.options, id as i32), CB_GETCURSEL, 0, 0).max(0) as usize
     }
@@ -2470,14 +2675,20 @@ impl App {
             p.click.consecutive = self.checked(423);
             p.click.fast_gesture = self.checked(424);
             p.click_sound = self.checked(425);
-            p.visual_feedback = self.checked(426);
             p.pause_on_mouse_ms = self.number(427, 0, 10000)?;
             for i in 0..4 {
-                p.click.gestures[i] = ClickAction::ALL[self.selected(429 + i as u16).min(7)];
+                p.click.gestures[i] = ClickAction::ALL[self
+                    .selected(429 + i as u16)
+                    .min(ClickAction::ALL.len() - 1)];
             }
-            p.camera_index = self.number(440, 0, 32)? as i32;
+            p.camera = self
+                .camera_choices
+                .get(self.selected(440))
+                .cloned()
+                .flatten();
             p.track_face = self.checked(441);
-            p.face_timeout_ms = self.number(442, 100, 3000)?;
+            p.stop_on_face_loss = self.checked(444);
+            p.face_timeout_ms = self.number(442, 100, 59_000)?;
             p.detection_interval_ms = self.number(443, 50, 2000)?;
             p.fast_bar = self.selected(450) == 1;
             p.thin_bar = self.selected(451) == 1;
@@ -2485,6 +2696,7 @@ impl App {
             p.auto_hide = self.checked(453);
             p.show_bar = self.checked(454);
             p.keyboard_command = text(GetDlgItem(self.options, 455));
+            p.enabled_at_startup = Some(self.checked(459));
             let key = |id| {
                 if self.selected(id) == 0 {
                     0
@@ -2523,7 +2735,6 @@ impl App {
                 }
                 self.release_all();
                 *self.config.profile_mut() = profile;
-                self.config.enabled_at_startup = self.checked(459);
                 self.config.minimized_at_startup = self.checked(460);
                 self.config.check_updates = self.checked(463);
                 self.config.language = if self.selected(465) == 1 { "it" } else { "en" }.into();
@@ -2564,66 +2775,10 @@ impl App {
 }
 
 unsafe fn login_enabled() -> bool {
-    use windows_sys::Win32::System::Registry::*;
-    let mut key: HKEY = null_mut();
-    if RegOpenKeyExW(
-        HKEY_CURRENT_USER,
-        wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
-        0,
-        KEY_READ,
-        &mut key,
-    ) != ERROR_SUCCESS
-    {
-        return false;
-    }
-    let result = RegQueryValueExW(
-        key,
-        wide("robocam").as_ptr(),
-        null(),
-        null_mut(),
-        null_mut(),
-        null_mut(),
-    );
-    RegCloseKey(key);
-    result == ERROR_SUCCESS
+    startup::enabled()
 }
 unsafe fn set_login(enabled: bool) -> Result<(), String> {
-    use windows_sys::Win32::System::Registry::*;
-    let mut key: HKEY = null_mut();
-    let status = RegCreateKeyExW(
-        HKEY_CURRENT_USER,
-        wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
-        0,
-        null(),
-        0,
-        KEY_SET_VALUE,
-        null(),
-        &mut key,
-        null_mut(),
-    );
-    if status != ERROR_SUCCESS {
-        return Err(format!("Windows error {status}"));
-    }
-    let status = if enabled {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let value = wide_raw(&format!("\"{}\" --minimized", exe.display()));
-        RegSetValueExW(
-            key,
-            wide("robocam").as_ptr(),
-            0,
-            REG_SZ,
-            value.as_ptr() as *const u8,
-            (value.len() * 2) as u32,
-        )
-    } else {
-        RegDeleteValueW(key, wide("robocam").as_ptr())
-    };
-    RegCloseKey(key);
-    if status == ERROR_SUCCESS || (!enabled && status == ERROR_FILE_NOT_FOUND) {
-        Ok(())
-    } else {
-        Err(format!("Windows error {status}"))
-    }
+    startup::configure(enabled)
 }
 
 impl App {
@@ -2632,7 +2787,6 @@ impl App {
             SetForegroundWindow(self.wizard);
             return;
         }
-        self.enabled = false;
         self.release_all();
         self.wizard_step = 0;
         self.calibration_started = 0;
@@ -2651,7 +2805,8 @@ impl App {
             self as *mut Self as *const c_void,
         );
         self.prepare_window(self.wizard, 400, 300);
-        self.child(self.wizard, "STATIC", "", 330, 0, [20, 18, 350, 185]);
+        self.child(self.wizard, "STATIC", "", 330, 0, [20, 18, 350, 172]);
+        self.child(self.wizard, "STATIC", "", 331, 0, [20, 192, 350, 22]);
         self.child(
             self.wizard,
             "BUTTON",
@@ -2679,10 +2834,11 @@ impl App {
                 "Vertical calibration\n\nMove your head slowly UP and DOWN over a comfortable range.\n\nWait until the measurement completes, then choose Next to review your settings."
             }
             _ => {
-                "Ready\n\nYour pointer speeds have been adjusted.\n\nPress F11 to enable head control. Move your head to move the pointer; hold still to click. Select different clicks on the top bar.\n\nYou can tune speed, smoothing and dwell time in Configuration at any time."
+                "Ready\n\nYour pointer speeds have been adjusted.\n\nUse the enable button to start or pause head control. Move your head to move the pointer; hold still to click.\n\nYou can tune speed, smoothing and dwell time in Configuration at any time."
             }
         };
         set_text(GetDlgItem(self.wizard, 330), description);
+        set_text(GetDlgItem(self.wizard, 331), "");
         set_text(
             GetDlgItem(self.wizard, NEXT as i32),
             if self.wizard_step == 4 {
@@ -2693,6 +2849,8 @@ impl App {
         );
     }
     unsafe fn start_measurement(&mut self) {
+        self.release_all();
+        self.motion.reset();
         self.calibration_started = now();
         self.calibration_position = (0.0, 0.0);
         self.calibration_min = (0.0, 0.0);
@@ -2707,14 +2865,10 @@ impl App {
                 self.wizard_text();
             }
             1 => {
-                if !self
-                    .frame
-                    .as_ref()
-                    .is_some_and(|f| f.face_detected || !self.config.profile().track_face)
-                {
+                if !self.tracking_ready() {
                     message(
                         self.wizard,
-                        "Wait until your face is detected in the preview before starting.",
+                        "Wait until head tracking is ready in the preview before starting.",
                     );
                     return;
                 }
@@ -2791,6 +2945,23 @@ impl App {
             if range < 4.0 { "Retry" } else { "Next" },
         );
         EnableWindow(GetDlgItem(self.wizard, NEXT as i32), 1);
+    }
+
+    unsafe fn refresh_wizard_tracking(&self) {
+        if self.wizard.is_null() || self.wizard_step != 1 {
+            return;
+        }
+        let ready = self.tracking_ready();
+        let label = if ready {
+            "Head tracking ready"
+        } else {
+            "Waiting for reliable head tracking…"
+        };
+        let status = GetDlgItem(self.wizard, 331);
+        if text(status) != crate::i18n::translate(label) {
+            set_text(status, label);
+        }
+        EnableWindow(GetDlgItem(self.wizard, NEXT as i32), i32::from(ready));
     }
 
     unsafe fn poll_updates(&mut self) {

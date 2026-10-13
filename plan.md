@@ -1,22 +1,19 @@
-PLAN
+# robocam implementation plan
 
----
+Build a Rust application with a native Windows 11 interface and OpenCV head-motion
+tracking. Provide a Windows installer and automatic login startup.
 
-starting from the idea of eviacam (clone it, see https://github.com/cmauri/eviacam) I want you to recreate something similar to it, possibly in Qt6 or in native GUI, written in Rust, targetting Windows 11. It must be called "robocam".
+Provide separate single, double and triple left-click controls, middle/right click,
+wheel scrolling and a drag action that holds the selected single button until the
+next moved-then-stopped dwell. Include profiles, calibration, keyboard access,
+hotkeys, workspace options and update checks through GitHub Releases.
 
-Face motion detection should be done in OpenCV or something similar. When face moves, the mouse pointer moves accordingly. Try to mimic very closely the eviacam behaviour on this.
+Use 48-pixel click icons and 32-pixel main icons with DPI scaling. The top bar must
+be fixed, full-width and left-aligned, reserving workspace above other windows.
+Draw a three-button mouse with a central wheel and red action indicators.
 
-finally, i want you to create an installer that provides to automatically start it at the user login.
-
-Mouse functionalities click (a button for each):
-
-- single left click
-- double left click
-- triple left click
-- single central mouse click
-- mouse wheel drag (to scroll)
-- single right click
-- drag functionality -> when clicked, shouldn't be reclaimed until the cursor stops again (as if it clicks again). it can apply to already selected click -> it applies to single clicks
-- ...and the other eviacam functionalities
-
-All the other eviacam functionalities should be ported as is. Change icons to another style. Make still sure that sizes for bar, icon, window from eviacam are kept.
+Pause only desktop clicks; keep camera and pointer movement active and keep Play
+accessible through dwell. Provide a dedicated SketchUp group/component editing action.
+List cameras by name, remember stable device identity and allow forgetting the choice.
+Use elevated input access and Realtime process priority, with bounded vision work.
+Ship the Robo profile and support deployment diagnostics and reproducible packaging.

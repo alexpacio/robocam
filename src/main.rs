@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use robocam::{engine, i18n, settings, updates};
+use robocam::{cameras, engine, i18n, settings, updates};
 #[cfg(windows)]
 mod vision;
 #[cfg(windows)]
