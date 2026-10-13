@@ -67,11 +67,13 @@ impl App {
         self.pending_target = Some(target);
         let start = now() + 40;
         let gap = u64::from((GetDoubleClickTime() / 2).clamp(20, 60));
-        for time in [start, start + gap] {
-            self.pending_input
-                .push_back((time, MouseButton::Left, true));
-            self.pending_input
-                .push_back((time + 10, MouseButton::Left, false));
-        }
+        let press = self.config.profile().click.press_ms.unwrap_or(10);
+        self.pending_input.extend(click_sequence(
+            start,
+            MouseButton::Left,
+            2,
+            press,
+            gap.saturating_sub(10),
+        ));
     }
 }

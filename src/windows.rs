@@ -75,7 +75,6 @@ thread_local! {
     static APPBAR_POSITIONING: Cell<bool> = const { Cell::new(false) };
     static APPBAR_PENDING: Cell<bool> = const { Cell::new(false) };
     static APPBAR_RECT: Cell<Option<(u32,[i32;4])>> = const { Cell::new(None) };
-    static APPBAR_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
 }
 struct CallbackGuard;
@@ -106,7 +105,8 @@ const BAR_ACTIONS: [(u16, &str, ClickAction); 9] = [
     ),
 ];
 
-const BAR_BUTTONS: [(u16, &str); 15] = [
+const BAR_BUTTONS: [(u16, &str); 10] = [
+    (210, "Enable / pause"),
     (202, "Left click"),
     (205, "Double click"),
     (206, "Triple click"),
@@ -114,14 +114,8 @@ const BAR_BUTTONS: [(u16, &str); 15] = [
     (203, "Middle click"),
     (208, "Scroll"),
     (211, "SketchUp: edit group/component"),
-    (210, "Enable / pause"),
-    (201, "No click"),
     (204, "Right click"),
     (209, "Show main window"),
-    (KEYBOARD, "Keyboard"),
-    (OPTIONS, "Configuration"),
-    (WIZARD, "Setup"),
-    (HELP, "Help"),
 ];
 
 fn wide(s: &str) -> Vec<u16> {
@@ -138,6 +132,47 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 fn now() -> u64 {
     unsafe { GetTickCount64() }
+}
+
+fn click_sequence(
+    start: u64,
+    button: MouseButton,
+    count: u8,
+    press_ms: u64,
+    gap_ms: u64,
+) -> impl Iterator<Item = (u64, MouseButton, bool)> {
+    (0..u64::from(count)).flat_map(move |index| {
+        let down = start + index * (press_ms + gap_ms);
+        [(down, button, true), (down + press_ms, button, false)]
+    })
+}
+
+#[cfg(test)]
+mod click_timing_tests {
+    use super::*;
+
+    #[test]
+    fn long_presses_never_overlap_in_multi_clicks() {
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            for count in 1..=3 {
+                let sequence: Vec<_> = click_sequence(100, button, count, 120, 25).collect();
+                assert_eq!(sequence.len(), usize::from(count) * 2);
+                for pair in sequence.as_chunks::<2>().0 {
+                    assert_eq!((pair[0].1, pair[0].2), (button, true));
+                    assert_eq!((pair[1].1, pair[1].2), (button, false));
+                    assert_eq!(pair[1].0 - pair[0].0, 120);
+                }
+                for pair in sequence[1..].as_chunks::<2>().0 {
+                    assert_eq!(pair[1].0 - pair[0].0, 25);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_duration_keeps_immediate_clicks() {
+        assert!(click_sequence(100, MouseButton::Left, 3, 0, 0).all(|event| event.0 == 100));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -453,6 +488,9 @@ pub fn run() {
         if dry_run {
             app.open_options();
         }
+        if auto_close {
+            app.verify_bar_lifecycle();
+        }
         if dry_run && !auto_close {
             // Override a launcher's inherited hidden STARTUPINFO after the
             // first ShowWindow call has consumed it.
@@ -657,24 +695,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         APPBAR_CALLBACK if hwnd == app.bar => {
             match wp as u32 {
-                ABN_FULLSCREENAPP => {
-                    APPBAR_FULLSCREEN.with(|fullscreen| fullscreen.set(lp != 0));
+                ABN_FULLSCREENAPP | ABN_WINDOWARRANGE if app.config.profile().show_bar => {
                     SetWindowPos(
                         hwnd,
-                        if lp != 0 { HWND_BOTTOM } else { HWND_TOPMOST },
+                        HWND_TOPMOST,
                         0,
                         0,
                         0,
                         0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                     );
-                }
-                ABN_WINDOWARRANGE => {
-                    if lp != 0 {
-                        ShowWindow(hwnd, SW_HIDE);
-                    } else if app.config.profile().show_bar {
-                        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                    }
                 }
                 _ => {}
             }
@@ -803,8 +833,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         TRAY_MESSAGE => {
             if lp as u32 == WM_LBUTTONUP || lp as u32 == WM_LBUTTONDBLCLK {
-                ShowWindow(app.hwnd, SW_RESTORE);
-                SetForegroundWindow(app.hwnd);
+                app.show_main();
             }
             0
         }
@@ -871,7 +900,6 @@ unsafe fn remove_appbar(hwnd: HWND) {
     }
     APPBAR_WINDOW.with(|window| window.set(null_mut()));
     APPBAR_RECT.with(|rectangle| rectangle.set(None));
-    APPBAR_FULLSCREEN.with(|fullscreen| fullscreen.set(false));
     let previous = APPBAR_POSITIONING.with(|busy| busy.replace(true));
     let mut data = appbar_data(hwnd);
     SHAppBarMessage(ABM_REMOVE, &mut data);
@@ -892,6 +920,13 @@ impl Drop for AppbarPositionGuard {
 
 impl App {
     unsafe fn destroy_owned(&mut self, hwnd: HWND) {
+        // The bar has no owner so minimizing the preview cannot hide it.
+        // Explicitly destroy it before tearing down the main window.
+        if hwnd == self.hwnd && !self.bar.is_null() {
+            let bar = self.bar;
+            self.bar = null_mut();
+            self.destroy_owned(bar);
+        }
         remove_appbar(if hwnd == self.hwnd { self.bar } else { hwnd });
         self.window_dpi.retain(|(window, _)| *window != hwnd);
         self.logical_children
@@ -1212,7 +1247,7 @@ impl App {
             main_rect.top,
             scale(561, self.dpi_for(self.hwnd)),
             scale(52, self.dpi_for(self.hwnd)),
-            self.hwnd,
+            null_mut(),
             null_mut(),
             GetModuleHandleW(null()),
             self as *mut Self as *const c_void,
@@ -1225,7 +1260,7 @@ impl App {
         let gap = if thin { 9 } else { 15 };
         let mut offset = 0;
         for (id, label) in BAR_BUTTONS {
-            if matches!(id, 210 | 209 | KEYBOARD) {
+            if matches!(id, 202 | 209) {
                 offset += gap;
             }
             let title = if thin && id == 211 { "SketchUp" } else { label };
@@ -1267,10 +1302,7 @@ impl App {
         self.position_bar();
         ShowWindow(
             self.bar,
-            if self.config.profile().show_bar
-                && (self.config.profile().bar_position == 4
-                    || APPBAR_WINDOW.with(|window| window.get() == self.bar))
-            {
+            if self.config.profile().show_bar {
                 SW_SHOWNOACTIVATE
             } else {
                 SW_HIDE
@@ -1336,7 +1368,7 @@ impl App {
                 area.top + scale(70, dpi),
                 w,
                 h,
-                SWP_NOACTIVATE,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
             return;
         }
@@ -1351,9 +1383,16 @@ impl App {
         if !registered {
             data.uCallbackMessage = APPBAR_CALLBACK;
             if SHAppBarMessage(ABM_NEW, &mut data) == 0 {
-                // Never replace workspace reservation with an overlapping
-                // always-on-top fallback when the shell rejects registration.
-                ShowWindow(self.bar, SW_HIDE);
+                // Keep controls reachable even while Explorer is unavailable.
+                SetWindowPos(
+                    self.bar,
+                    HWND_TOPMOST,
+                    monitor.rcWork.left,
+                    monitor.rcWork.top,
+                    w,
+                    h,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
                 self.status = "Windows could not reserve space for the click bar.".into();
                 return;
             }
@@ -1392,6 +1431,7 @@ impl App {
         let mut current: RECT = zeroed();
         GetWindowRect(self.bar, &mut current);
         if !registered
+            || IsWindowVisible(self.bar) == 0
             || current.left != data.rc.left
             || current.top != data.rc.top
             || current.right != data.rc.right
@@ -1399,16 +1439,12 @@ impl App {
         {
             SetWindowPos(
                 self.bar,
-                if APPBAR_FULLSCREEN.with(Cell::get) {
-                    HWND_BOTTOM
-                } else {
-                    HWND_TOPMOST
-                },
+                HWND_TOPMOST,
                 data.rc.left,
                 data.rc.top,
                 data.rc.right - data.rc.left,
                 data.rc.bottom - data.rc.top,
-                SWP_NOACTIVATE,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
     }
@@ -1612,7 +1648,6 @@ impl App {
             self.last_status = self.status.clone();
         }
         self.refresh_wizard_tracking();
-        self.auto_hide_bar(position);
         self.refresh_bar_visuals();
         if time.saturating_sub(self.diagnostic_written_ms) >= 1000 {
             if !self.dry_run {
@@ -1631,16 +1666,10 @@ impl App {
                 InputEvent::Click(button, count) => {
                     self.click_actions += 1;
                     let spacing = self.config.profile().event_delay_ms;
+                    let press = self.config.profile().click.press_ms.unwrap_or(spacing);
                     let time = now();
-                    for i in 0..count {
-                        self.pending_input
-                            .push_back((time + 2 * i as u64 * spacing, button, true));
-                        self.pending_input.push_back((
-                            time + (2 * i as u64 + 1) * spacing,
-                            button,
-                            false,
-                        ));
-                    }
+                    self.pending_input
+                        .extend(click_sequence(time, button, count, press, spacing));
                     // A zero-delay click should reach Windows in this frame,
                     // without waiting for another WM_TIMER delivery.
                     self.flush_pending_input(now());
@@ -1700,8 +1729,14 @@ impl App {
             .is_some_and(|(due, _, _)| *due <= time)
         {
             let (due, button, down) = self.pending_input.pop_front().unwrap();
-            self.last_click_dispatch_delay_ms = now().saturating_sub(due);
+            let delay = now().saturating_sub(due);
+            self.last_click_dispatch_delay_ms = delay;
             self.button(button, down);
+            // Preserve press duration and inter-click gaps when a timer is late.
+            // Otherwise an overdue down/up pair could collapse into one frame.
+            for (next, _, _) in &mut self.pending_input {
+                *next += delay;
+            }
         }
         if self.pending_input.is_empty() {
             self.pending_target = None;
@@ -1900,25 +1935,46 @@ impl App {
             GetDlgCtrlID(child) as u16
         }
     }
-    unsafe fn auto_hide_bar(&self, p: (i32, i32)) {
-        if !self.config.profile().show_bar || !self.config.profile().auto_hide {
-            return;
+    unsafe fn show_main(&self) {
+        ShowWindow(self.hwnd, SW_RESTORE);
+        BringWindowToTop(self.hwnd);
+        SetForegroundWindow(self.hwnd);
+    }
+
+    unsafe fn verify_bar_lifecycle(&mut self) {
+        assert!(GetWindow(self.bar, GW_OWNER).is_null());
+        ShowWindow(self.hwnd, SW_MINIMIZE);
+        assert_ne!(IsWindowVisible(self.bar), 0, "bar hidden by minimize");
+        ShowWindow(self.hwnd, SW_HIDE);
+        assert_ne!(IsWindowVisible(self.bar), 0, "bar hidden with preview");
+        self.command(self.bar, 209, 0);
+        assert_eq!(IsIconic(self.hwnd), 0);
+        assert_ne!(IsWindowVisible(self.hwnd), 0);
+        // A second activation must never hide an already-visible preview.
+        self.command(self.bar, 209, 0);
+        assert_ne!(IsWindowVisible(self.hwnd), 0);
+        for id in [201, KEYBOARD, OPTIONS, WIZARD, HELP] {
+            assert!(GetDlgItem(self.bar, i32::from(id)).is_null());
         }
-        let mut r: RECT = zeroed();
-        GetWindowRect(self.bar, &mut r);
-        let margin = scale(20, self.dpi_for(self.bar));
-        let near = match self.config.profile().bar_position {
-            0 => p.1 < r.bottom + margin,
-            1 => p.1 > r.top - margin,
-            2 => p.0 < r.right + margin,
-            3 => p.0 > r.left - margin,
-            _ => true,
-        };
-        // Keep the full AppBar reservation while visually hidden. Revealing
-        // the controls therefore never covers a maximized application's UI.
-        if (IsWindowVisible(self.bar) != 0) != near {
-            ShowWindow(self.bar, if near { SW_SHOWNOACTIVATE } else { SW_HIDE });
-        }
+        assert_eq!(GetDlgCtrlID(GetWindow(self.bar, GW_CHILD)), 210);
+        let enabled = self.enabled;
+        self.command(self.bar, 210, 0);
+        assert_eq!(self.enabled, !enabled);
+        self.command(self.bar, 210, 0);
+        assert_eq!(self.enabled, enabled);
+
+        // Simulate a stalled timer: a timed press must not collapse into an
+        // immediate down/up pair, and pausing must still release it at once.
+        let time = now();
+        self.pending_input
+            .extend(click_sequence(time - 500, MouseButton::Left, 2, 120, 25));
+        self.flush_pending_input(time);
+        assert!(self.injected[0]);
+        assert_eq!(self.pending_input.len(), 3);
+        assert!(self.pending_input.front().unwrap().0 >= time + 120);
+        self.release_all();
+        assert!(!self.injected.iter().any(|down| *down));
+        assert!(self.pending_input.is_empty());
     }
 }
 
@@ -2023,16 +2079,7 @@ impl App {
                 self.release_all();
                 self.destroy_owned(self.hwnd);
             }
-            209 => {
-                ShowWindow(
-                    self.hwnd,
-                    if IsWindowVisible(self.hwnd) != 0 {
-                        SW_HIDE
-                    } else {
-                        SW_RESTORE
-                    },
-                );
-            }
+            209 => self.show_main(),
             202..=208 | 211 => {
                 if source == self.bar
                     && now().saturating_sub(PHYSICAL_INPUT.load(Ordering::Relaxed)) < 100
@@ -2303,6 +2350,13 @@ impl App {
             "Pause after physical mouse (ms)",
             p.pause_on_mouse_ms,
         );
+        self.edit(
+            1,
+            7,
+            428,
+            "Mouse press duration (0-1000 ms)",
+            p.click.press_ms.unwrap_or(p.event_delay_ms),
+        );
         let actions: Vec<&str> = ClickAction::ALL.iter().map(|a| a.label()).collect();
         for (i, label) in [
             "Gesture: move left",
@@ -2415,13 +2469,6 @@ impl App {
             "Position",
             &["Top", "Bottom", "Left", "Right", "Floating"],
             p.bar_position as usize,
-        );
-        self.check(
-            3,
-            3,
-            453,
-            "Automatically hide bar until pointer nears edge",
-            p.auto_hide,
         );
         self.check(3, 4, 454, "Show click bar", p.show_bar);
         self.check(
@@ -2703,6 +2750,7 @@ impl App {
             p.click.fast_gesture = self.checked(424);
             p.click_sound = self.checked(425);
             p.pause_on_mouse_ms = self.number(427, 0, 10000)?;
+            p.click.press_ms = Some(self.number(428, 0, 1000)?);
             for i in 0..4 {
                 p.click.gestures[i] = ClickAction::ALL[self
                     .selected(429 + i as u16)
@@ -2720,7 +2768,6 @@ impl App {
             p.fast_bar = self.selected(450) == 1;
             p.thin_bar = self.selected(451) == 1;
             p.bar_position = self.selected(452) as u8;
-            p.auto_hide = self.checked(453);
             p.show_bar = self.checked(454);
             p.high_contrast_bar = self.checked(466);
             p.keyboard_command = text(GetDlgItem(self.options, 455));

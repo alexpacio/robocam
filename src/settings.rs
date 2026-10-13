@@ -20,7 +20,6 @@ pub struct Profile {
     pub bar_position: u8,
     pub thin_bar: bool,
     pub high_contrast_bar: bool,
-    pub auto_hide: bool,
     pub show_bar: bool,
     pub click_sound: bool,
     pub pause_on_mouse_ms: u64,
@@ -51,7 +50,6 @@ impl Default for Profile {
             bar_position: 0,
             thin_bar: false,
             high_contrast_bar: false,
-            auto_hide: false,
             show_bar: true,
             click_sound: true,
             pause_on_mouse_ms: 1000,
@@ -268,6 +266,7 @@ impl Profile {
             *margin = (*margin).min(50);
         }
         self.click.dwell_ms = self.click.dwell_ms.clamp(200, 5000);
+        self.click.press_ms = self.click.press_ms.map(|value| value.min(1000));
         self.click.tolerance_px = self.click.tolerance_px.clamp(1, 8);
     }
 }
@@ -275,6 +274,28 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_press_duration_migrates_and_roundtrips_per_profile() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"profiles":{"Alex":{"event_delay_ms":25,"auto_hide":true}},"active_profile":"Alex"}"#,
+        ).unwrap();
+        settings.normalize();
+        assert_eq!(settings.profile().click.press_ms, None);
+        assert_eq!(settings.profile().event_delay_ms, 25);
+        settings.profile_mut().click.press_ms = Some(120);
+        let mut loaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        loaded.normalize();
+        assert_eq!(loaded.profile().click.press_ms, Some(120));
+        assert_eq!(loaded.profiles[ROBO_PROFILE_NAME].click.press_ms, None);
+        loaded.profile_mut().click.press_ms = Some(u64::MAX);
+        loaded.normalize();
+        assert_eq!(loaded.profile().click.press_ms, Some(1000));
+        loaded.profile_mut().click.press_ms = Some(0);
+        loaded.normalize();
+        assert_eq!(loaded.profile().click.press_ms, Some(0));
+    }
 
     #[test]
     fn camera_choice_is_saved_and_can_be_forgotten_per_profile() {

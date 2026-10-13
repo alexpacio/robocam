@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 - 2026-10-13
+
+- Kept the click bar visible when the webcam window is minimized or hidden and
+  during desktop arrangement/fullscreen notifications. Removed automatic hiding;
+  old auto-hide preferences are ignored. Explicit bar visibility remains available.
+- Made the webcam button restore and bring the main window to the foreground
+  on every activation, including when it is already open behind another window.
+- Merged the two pause controls into one Play/Pause button at the far left and
+  removed Keyboard, Configuration, Setup and Help from the desktop bar. Those
+  commands remain accessible in the main window.
+- Added a per-profile mouse press duration in milliseconds in Click settings,
+  separate from dwell time. Existing profiles retain their previous timing until
+  edited. Long press durations can exceed Windows' double-click interval.
+- Updated toolbar and click-timing documentation.
+
 ## 0.2.0 - 2026-10-13
 
 - Added a saved, per-profile high-contrast click bar option: black background,

@@ -263,6 +263,9 @@ pub enum InputEvent {
 pub struct ClickSettings {
     pub mode: ClickMode,
     pub dwell_ms: u64,
+    /// None preserves the legacy platform event delay for existing profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub press_ms: Option<u64>,
     pub tolerance_px: u8,
     pub consecutive: bool,
     pub fast_gesture: bool,
@@ -277,6 +280,7 @@ impl Default for ClickSettings {
         Self {
             mode: ClickMode::Dwell,
             dwell_ms: 1000,
+            press_ms: None,
             tolerance_px: 3,
             consecutive: false,
             fast_gesture: false,

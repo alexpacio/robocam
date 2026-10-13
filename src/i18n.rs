@@ -154,6 +154,7 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Bottom margin (%)" => "Margine inferiore (%)",
         "Wrap pointer at workspace edges" => "Porta il puntatore al bordo opposto",
         "Click method" => "Metodo di clic",
+        "Mouse press duration (0-1000 ms)" => "Durata pressione mouse (0-1000 ms)",
         "Dwell" => "Sosta",
         "Gesture" => "Gesto",
         "Disabled" => "Disattivato",

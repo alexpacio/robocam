@@ -34,11 +34,21 @@ screen clicks only**: video and head-driven pointer movement continue. Dwell on
 The toolbar fills the screen width, keeps buttons on the left and reserves desktop
 space so maximized windows do not overlap it. The order is:
 
-1. Single left, double left, triple left.
-2. Drag (four-arrow cross), middle click, wheel scrolling.
-3. SketchUp group/component editing.
-4. Play/pause, no click, right click, main window.
-5. Keyboard, configuration, setup and help.
+1. Play/pause (one button that changes with the current state).
+2. Single left, double left, triple left.
+3. Drag (four-arrow cross), middle click, wheel scrolling.
+4. SketchUp group/component editing, right click, main window.
+
+The bar stays visible when the webcam window is minimized or hidden. Automatic
+hiding is no longer used, including for saved profiles that enabled it. The main
+window button always restores and brings the webcam window to the foreground.
+Keyboard, configuration, setup and help remain available in the main window.
+
+In **Configuration > Click**, **Dwell time** controls the wait before a click;
+**Mouse press duration (0-1000 ms)** controls how long each mouse button press
+lasts, including double/triple and SketchUp clicks. Both are saved per profile.
+Existing profiles keep their previous press timing until edited. Very long presses
+can exceed Windows' double-click interval and be recognized as separate clicks.
 
 Mouse icons have three buttons plus a central wheel; the relevant button/wheel is
 red. There is no floating cursor progress bar.
