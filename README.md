@@ -47,15 +47,19 @@ driver's setting alone.
 
 Move your head to move the pointer and stop over a target to click. **Pause stops
 screen clicks only**: video and head-driven pointer movement continue. Dwell on
-**Play** to resume. The separate **last button** pauses both movement and clicks;
-camera preview continues, held buttons are released and pending clicks are cancelled.
-Resume full pause with a physical click on that button or **F8** (configurable in
-General settings). A stationary pointer cannot automatically resume full pause.
+**Play** to resume. In the **main window**, the second button, immediately right of
+Play/Pause, stops both movement and clicks after a confirmation dialog. Head control
+remains usable until you confirm; Cancel leaves it unchanged. Camera preview continues,
+held buttons are released and pending clicks are cancelled. Resume with a physical
+click on the same button and confirm, or use **F8** (configurable in General settings).
+The hotkey toggles full pause immediately. A stationary pointer cannot resume it.
+
+![Confirmation before stopping webcam movement and clicks](docs/images/pause-confirmation.png)
 
 The toolbar fills the screen width, keeps buttons on the left and reserves desktop
-space so maximized windows do not overlap it. The order is:
+space so maximized windows do not overlap it. With SketchUp buttons enabled, the order is:
 
-![The eleven toolbar controls](docs/images/topbar.png)
+![The ten toolbar controls](docs/images/topbar.png)
 
 | Position | Control | Action |
 | --- | --- | --- |
@@ -69,14 +73,23 @@ space so maximized windows do not overlap it. The order is:
 | 8 | Middle click | One middle click. |
 | 9 | Scroll | Move your head to scroll while the pointer stays fixed. |
 | 10 | Main window | Restore the camera window from the tray. |
-| 11 | Pause movement and clicks | Stop/resume all webcam-generated mouse input. |
 
-![Full pause: the last button becomes Resume](docs/images/topbar-paused.png)
+![Full pause: the second main-window button becomes Resume](docs/images/main-paused.png)
+
+**Configuration > Click bar > Show SketchUp buttons** controls both cube buttons
+for the current profile. It is enabled by default. Uncheck it and save to hide
+both controls and close the gaps; the remaining buttons keep their relative order.
+A selected/locked SketchUp action is reset to left click when its controls are hidden.
+
+![Per-profile SketchUp button visibility](docs/images/click-bar-settings.png)
 
 The bar stays visible until robocam exits, including Show Desktop, desktop Peek,
 and minimizing or hiding the webcam window. Old hide-bar preferences are ignored.
 Minimizing the webcam window removes its taskbar button and leaves robocam in the tray. The main
 window button and tray icon restore and bring the webcam window to the foreground.
+The main window is kept inside the available desktop area when moved, resized or
+restored, including after camera/DPI changes. Its title bar cannot be covered by
+the click bar. The robot button at the right end of the toolbar always restores it.
 Keyboard, configuration, setup and help remain available in the main window.
 
 In **Configuration > Click**, **Dwell time** controls the wait before a click;
@@ -86,9 +99,12 @@ Existing profiles keep their previous press timing until edited. Very long press
 can exceed Windows' double-click interval and be recognized as separate clicks.
 
 Below **Play a sound on click**, enable **Black cursor with gray outline during
-click** to show a black pointer for the complete click action, including gaps in
+click** to recolor the standard Windows arrow black with a gray outline for the
+complete click action, including gaps in
 double/triple clicks and while dragging. It returns to the normal cursor when the
-action finishes or is cancelled. This option is saved per profile and starts off.
+action finishes or is cancelled. The arrow retains its native shape and click point.
+Over protected Windows UI that covers the overlay, the normal cursor stays visible.
+This option is saved per profile and starts off.
 Zero-duration clicks also have zero-duration cursor feedback. Click sounds use
 eViacam's original audio, embedded in the executable.
 
@@ -162,6 +178,8 @@ reads the real Anker driver's capabilities on the test PC.
 
 Settings are stored in `%APPDATA%\robocam\settings.json`; uninstall retains them.
 The interface offers English and Italian.
+Choose **Configuration > General > Language (restart required)**, save, and restart
+robocam to change the UI language. This is an application-wide preference.
 
 ## Updates and privacy
 

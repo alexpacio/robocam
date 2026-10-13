@@ -362,7 +362,7 @@ impl App {
         if look.compact {
             return;
         }
-        let icon_size = scale(if look.id >= 200 { 40 } else { 28 }, dpi)
+        let icon_size = scale(if look.on_bar { 40 } else { 28 }, dpi)
             .min(width)
             .min(height);
         let offset = scale(i32::from(look.pressed), dpi);

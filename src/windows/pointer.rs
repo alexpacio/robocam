@@ -53,7 +53,7 @@ impl App {
         let position = cursor();
         let input_sent = self.input_sent.get();
         let mut time = now();
-        for (id, _) in BAR_BUTTONS {
+        for (id, _) in bar_buttons(self.config.profile().show_sketchup_buttons) {
             self.enabled = true;
             let mut button: RECT = zeroed();
             GetWindowRect(GetDlgItem(self.bar, i32::from(id)), &mut button);
@@ -65,10 +65,7 @@ impl App {
             self.pointer_actions(time, MotionOutput::default(), centre, Some(centre));
             time += self.config.profile().click.dwell_ms;
             self.pointer_actions(time, MotionOutput::default(), centre, Some(centre));
-            assert!(
-                self.hover_done || (id == 212 && self.full_paused),
-                "toolbar dwell did not activate {id}"
-            );
+            assert!(self.hover_done, "toolbar dwell did not activate {id}");
             assert_eq!(
                 self.click_actions, actions,
                 "toolbar dwell generated a desktop click"
@@ -129,18 +126,28 @@ impl App {
             self.hover_done = false;
             return;
         }
-        let main_play = !self.enabled
-            && WindowFromPoint(POINT {
-                x: position.0,
-                y: position.1,
-            }) == GetDlgItem(self.hwnd, ENABLE as i32);
-        // The entire bar, including gaps and padding, excludes desktop dwell.
-        let over_bar = self.inside_window(self.bar, position) || main_play;
-        let bar_control = if main_play {
-            ENABLE
+        let hit = WindowFromPoint(POINT {
+            x: position.0,
+            y: position.1,
+        });
+        let main_control = [ENABLE, 212]
+            .into_iter()
+            .find(|id| hit == GetDlgItem(self.hwnd, i32::from(*id)));
+        let confirmation = messages::pause_window();
+        let answer = if confirmation.is_null() {
+            None
         } else {
-            self.bar_control_at(position)
+            [1u16, 2]
+                .into_iter()
+                .find(|id| hit == GetDlgItem(confirmation, i32::from(*id)))
         };
+        // The entire bar, including gaps and padding, excludes desktop dwell.
+        let over_bar = self.inside_window(self.bar, position)
+            || main_control.is_some()
+            || (!confirmation.is_null() && self.inside_window(confirmation, position));
+        let bar_control = main_control
+            .or(answer.map(|id| id + 212))
+            .unwrap_or_else(|| self.bar_control_at(position));
         if bar_control != self.hover_id
             || movement.delta.0.abs().max(movement.delta.1.abs())
                 > self.config.profile().click.tolerance_px as i32
@@ -159,14 +166,27 @@ impl App {
                 self.click.hover(*action, true);
             }
             if bar_control != 0
-                && (self.enabled || matches!(bar_control, 210 | ENABLE | 212))
+                && (self.enabled || matches!(bar_control, 210 | ENABLE | 212..=214))
                 && !self.hover_done
                 && time.saturating_sub(self.hover_since) >= self.config.profile().click.dwell_ms
             {
                 self.hover_done = true;
                 // A toolbar action is a local command; no mouse click is sent
                 // to the foreground application and no pointer move is needed.
-                self.command(if main_play { self.hwnd } else { self.bar }, bar_control, 0);
+                if let Some(answer) = answer {
+                    SendMessageW(confirmation, WM_COMMAND, usize::from(answer), 0);
+                    self.apply_pause_answer();
+                } else {
+                    self.command(
+                        if main_control.is_some() {
+                            self.hwnd
+                        } else {
+                            self.bar
+                        },
+                        bar_control,
+                        0,
+                    );
+                }
             }
         } else if self.enabled && self.pending_input.is_empty() {
             let delta = if self.click.scrolling() {

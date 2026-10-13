@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0 - 2026-10-13
+
+- Moved full movement/click pause from the end of the toolbar to the second button
+  in the main window, immediately right of click pause. Its confirmation dialog
+  keeps head control usable until confirmed; Cancel leaves the state unchanged.
+  Resuming with this button also asks for confirmation; the F8 hotkey stays immediate.
+- Updated the README with current native screenshots and the new pause workflow.
+- Fixed click feedback disappearing: render a complete alpha image before hiding
+  the native cursor, using the standard Windows arrow's shape and hotspot with a
+  black fill and gray outline. Restore the native cursor before removing feedback.
+  Keep the native cursor visible over protected system UI that covers the overlay.
+- Added a saved per-profile Show SketchUp buttons option, enabled by default for
+  new and existing profiles. Disabling it removes both cubes and compacts the bar;
+  a previously selected/locked SketchUp action is reset to left click.
+- Keep the main window within usable monitor space and outside the toolbar on
+  movement, camera resize, DPI changes, restore and toolbar repositioning, so its
+  title bar remains accessible.
+- Documented the existing English/Italian UI language selector under General
+  settings (restart required), and added actual desktop-pixel cursor checks and
+  native window-placement/profile-option regression coverage.
+
 ## 0.5.1 - 2026-10-13
 
 - Corrected the detailed toolbar guide: position 10 restores the main window;

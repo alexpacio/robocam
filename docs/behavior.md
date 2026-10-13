@@ -25,7 +25,10 @@ OpenCV has already initialized the capture thread.
 ## Clicking and pause
 
 The toolbar order is click Play/Pause, single left, double left, SketchUp double,
-SketchUp triple, right click, drag, middle, scroll, main window and full pause.
+SketchUp triple, right click, drag, middle, scroll and main window.
+This is the default layout. Each profile can hide both SketchUp controls; their
+buttons are removed and the remaining controls close the gaps. Hiding an active
+SketchUp selection/lock resets the click action to left click.
 Keyboard, configuration, setup
 and help are available in the main window. Icons have three mouse buttons with
 the wheel inside the middle one; the relevant button or wheel is red. Modifiers sit
@@ -38,11 +41,15 @@ Pause disables desktop clicks, releases held buttons and cancels pending actions
 Camera acquisition and head-driven pointer movement continue. Dwelling on Play
 still resumes clicking; the full-pause button remains reachable as well. Other
 toolbar dwell actions are suspended while click-only pause is active.
-Physical mouse actions remain available. The final full-pause button stops both
-webcam-driven movement and clicks, cancels pending input and resets motion history.
+Physical mouse actions remain available. The second main-window button, immediately
+right of click Play/Pause, asks for confirmation before stopping webcam movement and
+clicks, cancelling pending input and resetting motion history. The modeless dialog
+keeps head movement and its confirmation/cancel dwell controls usable until confirmed,
+even when ordinary clicks are paused. Cancel or closing the dialog changes nothing.
 Camera preview continues. Dwell is suspended during full pause, preventing an
 immediate unintended resume under the stationary pointer. Resume with a physical
-click or the configurable full-pause hotkey (F8 by default). The previous click-only
+click followed by confirmation, or the configurable full-pause hotkey (F8 by default).
+The hotkey acts immediately and closes any pending confirmation. The previous click-only
 pause state is retained when resuming full pause.
 
 Normal selection is temporary; selecting it again locks it. Fast mode selects on
@@ -66,6 +73,9 @@ the normal cursor. Zero-duration actions do not add an artificial highlight dela
 The replacement is a transparent, non-activating window; it does not receive clicks
 or change the user's saved Windows cursor scheme. Sound feedback uses the embedded
 original eViacam click audio, with its alternate sound when starting a drag.
+The arrow silhouette and hotspot come from the Windows standard arrow, recolored
+with premultiplied alpha. UpdateLayeredWindow uploads the complete image before
+the native cursor is hidden; feedback no longer depends on deferred WM_PAINT.
 
 SketchUp mode checks the application under the pointer, activates its Select tool
 with Space, then sends a paced left double or triple click at a fixed position.
@@ -89,8 +99,9 @@ guarantee responsiveness when camera drivers or other hardware stall.
 The toolbar is a Shell AppBar. Top/bottom docking spans monitor width and reserves
 desktop work area; buttons start at the left. It stays visible through Show Desktop,
 Peek and minimization; only application shutdown removes its reservation. The main
-window minimizes to the tray and can be restored by the main-window button
-(position 10) or tray icon. The last button is now full pause/resume.
+window minimizes to the tray and can be restored by the robot button
+at the end of the toolbar or by the tray icon. Its bounds are constrained to monitor work
+area and away from the bar on move, resize, restore, DPI and toolbar changes.
 Main icons use 28 logical pixels in 36-pixel buttons and click icons
 use 40 in 48-pixel buttons. They share a 48-unit grid with round caps and joins,
 with per-monitor DPI scaling. GDI does not antialias, so each button is painted at
@@ -129,3 +140,13 @@ focus or intercept the click target, then restores the cursor (also on test pani
 checks that the toolbar remains the actual hit-test target while the main window
 is hidden, restores the desktop and verifies reopening the main window. Run this
 only in an interactive session; it briefly rearranges that session's windows.
+
+`--cursor-test <report.json>` places an owned white test window beneath the pointer,
+shows click feedback, then samples actual compositor pixels for a black body and
+gray outline. It verifies click-through behavior and restoration, and saves a BMP
+of the test area. If protected system UI covers the fixture, the report instead
+checks that the native-cursor fallback is active. It does not move the pointer or
+capture camera images.
+
+UI language is selected in General settings and saved application-wide; it takes
+effect at the next launch. SketchUp visibility and click feedback are per-profile.

@@ -3,13 +3,54 @@ use super::*;
 
 const CLASS: &str = "robocam.notice";
 
+thread_local! {
+    static PAUSE_WINDOW: std::cell::Cell<HWND> = const { std::cell::Cell::new(null_mut()) };
+    static PAUSE_ANSWER: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn pause_window() -> HWND {
+    PAUSE_WINDOW.with(|window| window.get())
+}
+
+pub(super) fn take_pause_answer() -> Option<bool> {
+    PAUSE_ANSWER.with(|answer| answer.take())
+}
+
+pub(super) unsafe fn cancel_pause_confirmation() {
+    let window = pause_window();
+    if !window.is_null() {
+        DestroyWindow(window);
+    }
+    take_pause_answer();
+}
+
+pub(super) unsafe fn confirm_pause(owner: HWND, target: bool) {
+    let existing = pause_window();
+    if !existing.is_null() {
+        SetForegroundWindow(existing);
+        return;
+    }
+    take_pause_answer();
+    show_notice(
+        owner,
+        if target {
+            "Pause webcam movement and clicks?\n\nHead control stays active until you confirm. To resume afterwards, use the full-pause hotkey or a physical mouse."
+        } else {
+            "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained."
+        },
+        None,
+        Some(target),
+    );
+}
+
 struct Notice {
     font: HFONT,
     release_url: Option<String>,
+    pause_target: Option<bool>,
 }
 
 pub(super) unsafe fn show(owner: HWND, content: &str) {
-    show_notice(owner, content, None);
+    show_notice(owner, content, None, None);
 }
 
 pub(super) unsafe fn show_releases(owner: HWND, content: &str, url: &str) {
@@ -17,10 +58,16 @@ pub(super) unsafe fn show_releases(owner: HWND, content: &str, url: &str) {
         owner,
         &format!("{content}\n\nGitHub Releases: alexpacio/robocam"),
         Some(url),
+        None,
     );
 }
 
-unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
+unsafe fn show_notice(
+    owner: HWND,
+    content: &str,
+    release_url: Option<&str>,
+    pause_target: Option<bool>,
+) {
     let class_name = wide_raw(CLASS);
     let instance = GetModuleHandleW(null());
     let class = WNDCLASSW {
@@ -34,13 +81,15 @@ unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
     RegisterClassW(&class);
     let dpi = GetDpiForWindow(owner).max(96);
     let height = if content.len() > 700 { 510 } else { 290 };
+    let mut owner_bounds: RECT = zeroed();
+    GetWindowRect(owner, &mut owner_bounds);
     let window = CreateWindowExW(
         WS_EX_CONTROLPARENT,
         class_name.as_ptr(),
         wide_raw("robocam").as_ptr(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        owner_bounds.left + (owner_bounds.right - owner_bounds.left - scale(570, dpi)) / 2,
+        owner_bounds.top + (owner_bounds.bottom - owner_bounds.top - scale(height, dpi)) / 2,
         scale(570, dpi),
         scale(height, dpi),
         owner,
@@ -51,10 +100,14 @@ unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
     if window.is_null() {
         return;
     }
+    // Native multiline EDIT controls require CRLF, including translated text.
+    let content = crate::i18n::translate(content)
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
     let field = CreateWindowExW(
         0,
         wide_raw("EDIT").as_ptr(),
-        wide(content).as_ptr(),
+        wide_raw(&content).as_ptr(),
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
         scale(16, dpi),
         scale(14, dpi),
@@ -68,8 +121,20 @@ unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
     let button = CreateWindowExW(
         0,
         wide_raw("BUTTON").as_ptr(),
-        wide_raw("OK").as_ptr(),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+        wide(if pause_target.is_some() {
+            "Confirm"
+        } else {
+            "OK"
+        })
+        .as_ptr(),
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | if pause_target.is_some() {
+                0
+            } else {
+                BS_DEFPUSHBUTTON as u32
+            },
         scale(438, dpi),
         scale(height - 76, dpi),
         scale(100, dpi),
@@ -79,6 +144,22 @@ unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
         instance,
         null(),
     );
+    let cancel = pause_target.map(|_| {
+        CreateWindowExW(
+            0,
+            wide_raw("BUTTON").as_ptr(),
+            wide("Cancel").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            scale(320, dpi),
+            scale(height - 76, dpi),
+            scale(100, dpi),
+            scale(28, dpi),
+            window,
+            2usize as HMENU,
+            instance,
+            null(),
+        )
+    });
     let release_button = release_url.map(|_| {
         CreateWindowExW(
             0,
@@ -114,16 +195,22 @@ unsafe fn show_notice(owner: HWND, content: &str, release_url: Option<&str>) {
     let notice = Box::new(Notice {
         font,
         release_url: release_url.map(str::to_owned),
+        pause_target,
     });
     SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(notice) as isize);
     SendMessageW(field, WM_SETFONT, font as usize, 1);
     SendMessageW(button, WM_SETFONT, font as usize, 1);
+    if let Some(cancel) = cancel {
+        SendMessageW(cancel, WM_SETFONT, font as usize, 1);
+        PAUSE_WINDOW.with(|handle| handle.set(window));
+    }
     if let Some(button) = release_button {
         SendMessageW(button, WM_SETFONT, font as usize, 1);
     }
+    placement::ensure(window);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
-    SetFocus(button);
+    SetFocus(cancel.unwrap_or(button));
 }
 
 pub(super) unsafe fn route(msg: &MSG) -> bool {
@@ -165,6 +252,12 @@ unsafe extern "system" fn notice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             0
         }
         WM_COMMAND if matches!(wp & 0xffff, 1 | 2) && (wp >> 16) == 0 => {
+            if wp == 1 {
+                let notice = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Notice;
+                if let Some(target) = notice.as_ref().and_then(|notice| notice.pause_target) {
+                    PAUSE_ANSWER.with(|answer| answer.set(Some(target)));
+                }
+            }
             DestroyWindow(hwnd);
             0
         }
@@ -173,6 +266,11 @@ unsafe extern "system" fn notice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             0
         }
         WM_NCDESTROY => {
+            PAUSE_WINDOW.with(|window| {
+                if window.get() == hwnd {
+                    window.set(null_mut());
+                }
+            });
             let notice = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Notice;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if !notice.is_null() {

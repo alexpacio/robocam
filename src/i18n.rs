@@ -111,8 +111,15 @@ fn static_italian(text: &str) -> Option<&'static str> {
         }
         "Pause / resume movement and clicks" => "Pausa / riprendi movimento e clic",
         "Pause movement and clicks hotkey" => "Tasto pausa movimento e clic",
-        "Movement and clicks paused — use the hotkey or last button" => {
-            "Movimento e clic in pausa — usa il tasto rapido o l'ultimo pulsante"
+        "Confirm" => "Conferma",
+        "Pause webcam movement and clicks?\n\nHead control stays active until you confirm. To resume afterwards, use the full-pause hotkey or a physical mouse." => {
+            "Mettere in pausa movimento e clic dalla webcam?\n\nIl controllo con la testa resta attivo fino alla conferma. Per riprendere, usa il tasto rapido della pausa completa o un mouse fisico."
+        }
+        "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained." => {
+            "Riprendere movimento e clic dalla webcam?\n\nL'impostazione precedente della pausa dei clic verrà mantenuta."
+        }
+        "Movement and clicks paused — use the hotkey or main window button" => {
+            "Movimento e clic in pausa — usa il tasto rapido o il pulsante nella finestra principale"
         }
         "Fixed zoom via camera driver" => "Zoom fisso tramite driver della webcam",
         "Native zoom increments" => "Incrementi dello zoom nativo",
@@ -232,6 +239,7 @@ fn static_italian(text: &str) -> Option<&'static str> {
             "Nascondi la barra finché il puntatore non si avvicina al bordo"
         }
         "Show click bar" => "Mostra barra dei clic",
+        "Show SketchUp buttons" => "Mostra pulsanti SketchUp",
         "The click bar stays visible until robocam exits." => {
             "La barra dei clic resta visibile fino alla chiusura di robocam."
         }
@@ -359,8 +367,8 @@ fn formatted_italian(text: &str) -> Cow<'_, str> {
     for (prefix, replacement) in [
         ("Tracking · ", "Controllo attivo · "),
         (
-            "Movement and clicks paused — use the hotkey or last button · ",
-            "Movimento e clic in pausa — tasto rapido o ultimo pulsante · ",
+            "Movement and clicks paused — use the hotkey or main window button · ",
+            "Movimento e clic in pausa — tasto rapido o pulsante nella finestra principale · ",
         ),
         (
             "Clicks paused — dwell on Play to resume · ",

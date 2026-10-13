@@ -20,6 +20,7 @@ pub(super) fn start(directory: PathBuf, main: HWND, bar: HWND, options: HWND, ba
             for (page, filename) in [
                 (2, "camera-settings.bmp"),
                 (1, "click-settings.bmp"),
+                (3, "click-bar-settings.bmp"),
                 (4, "general-settings.bmp"),
             ] {
                 SendMessageW(chooser, CB_SETCURSEL, page, 0);
@@ -39,7 +40,16 @@ pub(super) fn start(directory: PathBuf, main: HWND, bar: HWND, options: HWND, ba
                 }
                 window(options, &directory.join(filename), None)?;
             }
-            SendMessageW(bar, WM_COMMAND, 212, 0);
+            SendMessageW(main, WM_COMMAND, 212, 0);
+            let confirmation = GetLastActivePopup(main);
+            window(
+                confirmation,
+                &directory.join("pause-confirmation.bmp"),
+                None,
+            )?;
+            SendMessageW(confirmation, WM_COMMAND, 1, 0);
+            std::thread::sleep(Duration::from_millis(150));
+            window(main, &directory.join("main-paused.bmp"), None)?;
             window(bar, &directory.join("topbar-paused.bmp"), Some(bar_width))?;
             Ok(())
         })();

@@ -21,6 +21,7 @@ pub struct Profile {
     pub bar_position: u8,
     pub thin_bar: bool,
     pub high_contrast_bar: bool,
+    pub show_sketchup_buttons: bool,
     pub show_bar: bool,
     pub click_sound: bool,
     pub black_cursor_on_click: bool,
@@ -54,6 +55,7 @@ impl Default for Profile {
             bar_position: 0,
             thin_bar: false,
             high_contrast_bar: false,
+            show_sketchup_buttons: true,
             show_bar: true,
             click_sound: true,
             black_cursor_on_click: false,
@@ -424,6 +426,7 @@ mod tests {
         assert!(!settings.enabled_at_startup);
         assert_eq!(settings.profile().click.dwell_ms, 1000);
         assert!(!settings.profile().black_cursor_on_click);
+        assert!(settings.profile().show_sketchup_buttons);
     }
     #[test]
     fn click_cursor_preference_is_saved_per_profile() {
@@ -454,6 +457,18 @@ mod tests {
         assert_eq!(restored.profile().full_pause_key, 0);
         let legacy: Profile = serde_json::from_str("{}").unwrap();
         assert!(legacy.camera_zoom_steps.is_none());
+    }
+
+    #[test]
+    fn sketchup_buttons_are_visible_by_default_and_saved_independently_per_profile() {
+        let mut settings = Settings::default();
+        assert!(settings.profile().show_sketchup_buttons);
+        assert!(settings.profiles[ROBO_PROFILE_NAME].show_sketchup_buttons);
+        settings.profile_mut().show_sketchup_buttons = false;
+        let loaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert!(!loaded.profile().show_sketchup_buttons);
+        assert!(loaded.profiles[ROBO_PROFILE_NAME].show_sketchup_buttons);
     }
     #[test]
     fn profile_roundtrip_preserves_independent_settings() {

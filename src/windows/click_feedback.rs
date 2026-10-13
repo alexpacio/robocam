@@ -5,7 +5,6 @@ use windows_sys::Win32::{Media::Audio::*, UI::Magnification::*};
 const CLICK_SOUND: &[u8] = include_bytes!("../../assets/sounds/eviacam-click.wav");
 const DRAG_SOUND: &[u8] = include_bytes!("../../assets/sounds/eviacam-drag.wav");
 const CURSOR_CLASS: &str = "robocam.click-cursor";
-const TRANSPARENT_COLOR: u32 = 0x00ff00ff;
 
 pub(super) unsafe fn play_sound(drag_start: bool) {
     // Static storage remains valid until asynchronous playback finishes.
@@ -28,6 +27,12 @@ impl ClickCursor {
     pub(super) fn active(&self) -> bool {
         self.active
     }
+    pub(super) fn window(&self) -> HWND {
+        self.window
+    }
+    pub(super) unsafe fn native_visible(&self) -> bool {
+        GetWindowLongPtrW(self.window, GWLP_USERDATA) & cursor_image::NATIVE_VISIBLE != 0
+    }
 
     pub(super) unsafe fn update(&mut self, active: bool, dry_run: bool) {
         if active == self.active {
@@ -49,13 +54,16 @@ impl ClickCursor {
         if !position_window(self.window) {
             return;
         }
-        ShowWindow(self.window, SW_SHOWNOACTIVATE);
-        UpdateWindow(self.window);
-        if MagShowSystemCursor(0) == 0 {
+        if !cursor_image::show(self.window) {
+            ShowWindow(self.window, SW_HIDE);
+            return;
+        }
+        if !refresh_visibility(self.window) {
             ShowWindow(self.window, SW_HIDE);
             return;
         }
         self.active = true;
+        cursor_image::set_active(self.window, true);
         if SetTimer(self.window, 1, 10, None) == 0 {
             self.hide();
         }
@@ -99,11 +107,14 @@ impl ClickCursor {
             if self.window.is_null() {
                 return false;
             }
-            if SetLayeredWindowAttributes(self.window, TRANSPARENT_COLOR, 255, LWA_COLORKEY) == 0 {
-                DestroyWindow(self.window);
-                self.window = null_mut();
-                return false;
-            }
+            SetWindowLongPtrW(self.window, GWLP_USERDATA, cursor_image::NATIVE_VISIBLE);
+            let exclude_from_peek: i32 = 1;
+            DwmSetWindowAttribute(
+                self.window,
+                DWMWA_EXCLUDED_FROM_PEEK as u32,
+                (&exclude_from_peek as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
         }
         true
     }
@@ -111,8 +122,15 @@ impl ClickCursor {
     unsafe fn hide(&mut self) {
         if self.initialized && self.active {
             MagShowSystemCursor(1);
+            SetWindowLongPtrW(
+                self.window,
+                GWLP_USERDATA,
+                GetWindowLongPtrW(self.window, GWLP_USERDATA) | cursor_image::NATIVE_VISIBLE,
+            );
+            DwmFlush();
         }
         if !self.window.is_null() {
+            cursor_image::set_active(self.window, false);
             KillTimer(self.window, 1);
             ShowWindow(self.window, SW_HIDE);
         }
@@ -139,19 +157,59 @@ unsafe fn position_window(hwnd: HWND) -> bool {
     if GetCursorPos(&mut point) == 0 {
         return false;
     }
-    let dpi = GetDpiForWindow(hwnd).max(96);
-    let size = GetSystemMetricsForDpi(SM_CXCURSOR, dpi).max(scale(32, dpi));
-    // The tip is at (1, 1) in a 32-unit drawing; keep the real click hotspot.
-    let inset = (size / 32).max(1);
+    let hotspot = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     SetWindowPos(
         hwnd,
         HWND_TOPMOST,
-        point.x - inset,
-        point.y - inset,
-        size,
-        size,
-        SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        point.x - (hotspot & 0xffff) as i32,
+        point.y - ((hotspot >> 16) & 0x3fff) as i32,
+        0,
+        0,
+        SWP_NOSIZE
+            | SWP_NOACTIVATE
+            | SWP_NOOWNERZORDER
+            | if hotspot & cursor_image::ACTIVE != 0 {
+                SWP_SHOWWINDOW
+            } else {
+                0
+            },
     ) != 0
+}
+
+/// Trusted system UI (for example the on-screen keyboard) can live above the
+/// application's topmost band. Never hide the native cursor behind that UI.
+unsafe fn refresh_visibility(hwnd: HWND) -> bool {
+    let mut point: POINT = zeroed();
+    if GetCursorPos(&mut point) == 0 {
+        return false;
+    }
+    let target = GetAncestor(WindowFromPoint(point), GA_ROOT);
+    let mut above = GetWindow(hwnd, GW_HWNDPREV);
+    let mut covered = false;
+    while !above.is_null() {
+        if above == target {
+            covered = true;
+            break;
+        }
+        above = GetWindow(above, GW_HWNDPREV);
+    }
+    let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if covered != (state & cursor_image::NATIVE_VISIBLE != 0) {
+        if MagShowSystemCursor(i32::from(covered)) == 0 {
+            return false;
+        }
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_USERDATA,
+            (state & !cursor_image::NATIVE_VISIBLE)
+                | if covered {
+                    cursor_image::NATIVE_VISIBLE
+                } else {
+                    0
+                },
+        );
+    }
+    true
 }
 
 unsafe extern "system" fn cursor_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -159,44 +217,40 @@ unsafe extern "system" fn cursor_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_NCHITTEST => HTTRANSPARENT as isize,
         WM_MOUSEACTIVATE => MA_NOACTIVATE as isize,
         WM_TIMER => {
-            position_window(hwnd);
+            if GetWindowLongPtrW(hwnd, GWLP_USERDATA) & cursor_image::ACTIVE != 0 {
+                position_window(hwnd);
+                refresh_visibility(hwnd);
+            }
             0
         }
         WM_DPICHANGED => {
-            InvalidateRect(hwnd, null(), 0);
+            PostMessageW(hwnd, WM_APP, 0, 0);
             0
         }
-        WM_PAINT => {
-            let mut paint: PAINTSTRUCT = zeroed();
-            let dc = BeginPaint(hwnd, &mut paint);
-            let mut rect: RECT = zeroed();
-            GetClientRect(hwnd, &mut rect);
-            let background = CreateSolidBrush(TRANSPARENT_COLOR);
-            FillRect(dc, &rect, background);
-            DeleteObject(background);
-            let size = rect.right.max(32);
-            let points = [
-                (1, 1),
-                (1, 24),
-                (7, 18),
-                (12, 29),
-                (17, 27),
-                (12, 16),
-                (22, 16),
-            ]
-            .map(|(x, y)| POINT {
-                x: x * size / 32,
-                y: y * size / 32,
-            });
-            let pen = CreatePen(PS_SOLID, (size / 32).max(1), rgb(150, 150, 150));
-            let old_pen = SelectObject(dc, pen);
-            let old_brush = SelectObject(dc, GetStockObject(BLACK_BRUSH));
-            Polygon(dc, points.as_ptr(), points.len() as i32);
-            SelectObject(dc, old_brush);
-            SelectObject(dc, old_pen);
-            DeleteObject(pen);
-            EndPaint(hwnd, &paint);
+        WM_APP => {
+            if GetWindowLongPtrW(hwnd, GWLP_USERDATA) & cursor_image::ACTIVE != 0
+                && !cursor_image::show(hwnd)
+            {
+                MagShowSystemCursor(1);
+                SetWindowLongPtrW(
+                    hwnd,
+                    GWLP_USERDATA,
+                    GetWindowLongPtrW(hwnd, GWLP_USERDATA) | cursor_image::NATIVE_VISIBLE,
+                );
+                cursor_image::set_active(hwnd, false);
+                ShowWindow(hwnd, SW_HIDE);
+            }
             0
+        }
+        WM_WINDOWPOSCHANGING
+            if GetWindowLongPtrW(hwnd, GWLP_USERDATA) & cursor_image::ACTIVE != 0 =>
+        {
+            let position = &mut *(lp as *mut WINDOWPOS);
+            position.flags &= !SWP_HIDEWINDOW;
+            if position.flags & SWP_NOZORDER == 0 {
+                position.hwndInsertAfter = HWND_TOPMOST;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }

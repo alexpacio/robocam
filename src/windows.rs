@@ -4,9 +4,12 @@
 mod camera_options;
 mod capture;
 mod click_feedback;
+mod cursor_image;
+mod cursor_test;
 mod desktop_test;
 mod drawing;
 mod messages;
+mod placement;
 mod pointer;
 mod runtime;
 mod sketchup;
@@ -42,6 +45,7 @@ const APP_CLASS: &str = "robocam.window";
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const DEFERRED_DPI: u32 = WM_APP + 2;
 const DEFERRED_REDRAW: u32 = WM_APP + 5;
+const DEFERRED_PLACEMENT: u32 = WM_APP + 6;
 const APPBAR_CALLBACK: u32 = WM_APP + 3;
 const APPBAR_REPOSITION: u32 = WM_APP + 4;
 const ENABLE: u16 = 101;
@@ -112,7 +116,7 @@ const BAR_ACTIONS: [(u16, &str, ClickAction); 9] = [
     ),
 ];
 
-const BAR_BUTTONS: [(u16, &str); 11] = [
+const BAR_BUTTONS: [(u16, &str); 10] = [
     (210, "Enable / pause"),
     (202, "Left click"),
     (205, "Double click"),
@@ -123,8 +127,13 @@ const BAR_BUTTONS: [(u16, &str); 11] = [
     (203, "Middle click"),
     (208, "Scroll"),
     (209, "Show main window"),
-    (212, "Pause / resume movement and clicks"),
 ];
+
+fn bar_buttons(show_sketchup: bool) -> impl Iterator<Item = (u16, &'static str)> {
+    BAR_BUTTONS
+        .into_iter()
+        .filter(move |(id, _)| show_sketchup || !matches!(id, 206 | 211))
+}
 
 fn wide(s: &str) -> Vec<u16> {
     crate::i18n::translate(s)
@@ -321,6 +330,13 @@ pub fn run() {
             };
             let written = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
             if result.is_err() || written.is_err() {
+                std::process::exit(1);
+            }
+            return;
+        }
+        if let Some(path) = argument("--cursor-test") {
+            if let Err(error) = cursor_test::run(std::path::Path::new(path)) {
+                eprintln!("{error}");
                 std::process::exit(1);
             }
             return;
@@ -652,6 +668,10 @@ unsafe fn message(hwnd: HWND, text: &str) {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == DEFERRED_PLACEMENT {
+        placement::ensure(hwnd);
+        return 0;
+    }
     if msg == DEFERRED_REDRAW {
         let child = wp as HWND;
         if IsWindow(child) != 0 {
@@ -671,7 +691,21 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     }
+    if msg == WM_WINDOWPOSCHANGING && MAIN_WINDOW.with(|main| main.get() == hwnd) {
+        placement::constrain(hwnd, &mut *(lp as *mut WINDOWPOS));
+    }
+    if msg == WM_WINDOWPOSCHANGED
+        && MAIN_WINDOW.with(|main| main.get() == hwnd)
+        && IsIconic(hwnd) == 0
+    {
+        PostMessageW(hwnd, DEFERRED_PLACEMENT, 0, 0);
+    }
     if BAR_WINDOW.with(|bar| bar.get() == hwnd) {
+        if msg == WM_WINDOWPOSCHANGED {
+            MAIN_WINDOW.with(|main| {
+                PostMessageW(main.get(), DEFERRED_PLACEMENT, 0, 0);
+            });
+        }
         if msg == WM_SYSCOMMAND && wp & 0xfff0 == SC_MINIMIZE as usize {
             return 0;
         }
@@ -1285,6 +1319,7 @@ impl App {
         SetMenu(self.hwnd, menu);
         for (i, (id, label)) in [
             (ENABLE, "Enable / pause"),
+            (212, "Pause / resume movement and clicks"),
             (OPTIONS, "Configuration"),
             (KEYBOARD, "Keyboard"),
             (WIZARD, "Setup"),
@@ -1377,6 +1412,19 @@ impl App {
 
     unsafe fn create_bar(&mut self) {
         self.bar_visual_state = None;
+        if !self.config.profile().show_sketchup_buttons
+            && [self.click.selected(), self.click.locked()]
+                .iter()
+                .any(|action| {
+                    matches!(
+                        action,
+                        ClickAction::SketchUpEdit | ClickAction::SketchUpConnected
+                    )
+                })
+        {
+            self.release_all();
+            self.click = ClickEngine::default();
+        }
         if !self.bar.is_null() {
             self.destroy_owned(self.bar);
         }
@@ -1416,7 +1464,7 @@ impl App {
         let button = if thin { 76 } else { 48 };
         let gap = if thin { 9 } else { 15 };
         let mut offset = 0;
-        for (id, label) in BAR_BUTTONS {
+        for (id, label) in bar_buttons(self.config.profile().show_sketchup_buttons) {
             if matches!(id, 202 | 209) {
                 offset += gap;
             }
@@ -1463,6 +1511,7 @@ impl App {
         };
         self.bar_size = [w, h];
         self.position_bar();
+        placement::ensure(self.hwnd);
         ShowWindow(self.bar, SW_SHOWNOACTIVATE);
         self.refresh_bar_visuals();
     }
@@ -1489,7 +1538,7 @@ impl App {
                 }
             }
         }
-        for id in [ENABLE, BAR] {
+        for id in [ENABLE, 212, BAR] {
             let control = GetDlgItem(self.hwnd, id as i32);
             if !control.is_null() {
                 InvalidateRect(control, null(), 0);
@@ -1644,6 +1693,7 @@ impl App {
     }
 
     unsafe fn tick(&mut self) {
+        self.apply_pause_answer();
         let time = now();
         if (self.auto_close
             && self.smoke_started.elapsed().as_secs_f32() > 2.0
@@ -1697,7 +1747,7 @@ impl App {
                         format!(
                             "{} · {:.0} fps · {} points",
                             if self.full_paused {
-                                "Movement and clicks paused — use the hotkey or last button"
+                                "Movement and clicks paused — use the hotkey or main window button"
                             } else if self.enabled {
                                 "Tracking"
                             } else {
@@ -1926,6 +1976,8 @@ impl App {
         };
         let mut bar: RECT = zeroed();
         GetWindowRect(self.bar, &mut bar);
+        let mut main: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut main);
         let mut monitor: MONITORINFO = zeroed();
         monitor.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(
@@ -1934,9 +1986,10 @@ impl App {
         );
         let rectangle = |rect: RECT| [rect.left, rect.top, rect.right, rect.bottom];
         let frame = self.frame.as_ref();
-        let report = serde_json::json!({
+        let mut report = serde_json::json!({
             "version":env!("CARGO_PKG_VERSION"),
-            "bar_button_ids":BAR_BUTTONS.map(|(id,_)|id),
+            "bar_button_ids":bar_buttons(self.config.profile().show_sketchup_buttons).map(|(id,_)|id).collect::<Vec<_>>(),
+            "show_sketchup_buttons":self.config.profile().show_sketchup_buttons,
             "process_id":GetCurrentProcessId(), "running":running,
             "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
             "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
@@ -1967,6 +2020,9 @@ impl App {
             "bar_visible":IsWindowVisible(self.bar)!=0,
             "dpi":self.dpi_for(self.hwnd),
         });
+        report["main_bounds"] = serde_json::json!(rectangle(main));
+        report["main_visible"] = serde_json::json!(IsWindowVisible(self.hwnd) != 0);
+        report["language"] = serde_json::json!(self.config.language);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -2009,6 +2065,7 @@ impl App {
     }
 
     unsafe fn toggle_full_pause(&mut self) {
+        messages::cancel_pause_confirmation();
         self.full_paused = !self.full_paused;
         self.release_all();
         self.motion.reset();
@@ -2016,6 +2073,12 @@ impl App {
         self.hover_since = now();
         self.hover_done = false;
         self.refresh_bar_visuals();
+    }
+
+    unsafe fn apply_pause_answer(&mut self) {
+        if messages::take_pause_answer().is_some_and(|target| target != self.full_paused) {
+            self.toggle_full_pause();
+        }
     }
 
     unsafe fn toggle(&mut self) {
@@ -2121,6 +2184,7 @@ impl App {
     }
     unsafe fn show_main(&self) {
         ShowWindow(self.hwnd, SW_RESTORE);
+        placement::ensure(self.hwnd);
         BringWindowToTop(self.hwnd);
         SetForegroundWindow(self.hwnd);
     }
@@ -2167,12 +2231,90 @@ impl App {
 
         self.verify_click_feedback();
         self.verify_bar_pointer_geometry();
+        // A stale saved position, programmatic camera resize or restore must
+        // never put the main title bar underneath the reserved toolbar strip.
+        let mut bar_bounds: RECT = zeroed();
+        GetWindowRect(self.bar, &mut bar_bounds);
+        SetWindowPos(
+            self.hwnd,
+            null_mut(),
+            bar_bounds.left + 20,
+            bar_bounds.top,
+            360,
+            340,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        let mut main_bounds: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut main_bounds);
+        let mut intersection: RECT = zeroed();
+        assert_eq!(
+            IntersectRect(&mut intersection, &main_bounds, &bar_bounds),
+            0
+        );
+        let show_sketchup = self.config.profile().show_sketchup_buttons;
+        self.config.profile_mut().show_sketchup_buttons = false;
+        self.click.select(ClickAction::SketchUpConnected, true);
+        self.create_bar();
+        assert!(GetDlgItem(self.bar, 206).is_null() && GetDlgItem(self.bar, 211).is_null());
+        assert_eq!(self.click.selected(), ClickAction::Left);
+        self.verify_bar_pointer_geometry();
+        self.config.profile_mut().show_sketchup_buttons = show_sketchup;
+        self.create_bar();
+        assert!(
+            !GetDlgItem(self.options, 465).is_null(),
+            "UI language selector missing"
+        );
         let enabled = self.enabled;
         self.full_paused = false;
+        assert!(
+            GetDlgItem(self.bar, 212).is_null(),
+            "full pause remains on the bar"
+        );
+        let mut play: RECT = zeroed();
+        let mut stop: RECT = zeroed();
+        GetWindowRect(GetDlgItem(self.hwnd, ENABLE as i32), &mut play);
+        GetWindowRect(GetDlgItem(self.hwnd, 212), &mut stop);
+        assert!(stop.left >= play.right && stop.top == play.top);
+        self.command(self.hwnd, 212, 0);
+        assert!(
+            !self.full_paused,
+            "opening confirmation paused head control"
+        );
+        let confirmation = messages::pause_window();
+        assert!(!confirmation.is_null());
+        self.command(self.hwnd, 212, 0);
+        assert_eq!(messages::pause_window(), confirmation);
+        SendMessageW(confirmation, WM_COMMAND, 2, 0);
+        self.apply_pause_answer();
+        assert!(!self.full_paused, "Cancel changed the pause state");
+        self.command(self.hwnd, 212, 0);
+        SendMessageW(messages::pause_window(), WM_CLOSE, 0, 0);
+        self.apply_pause_answer();
+        assert!(
+            !self.full_paused,
+            "closing confirmation changed the pause state"
+        );
+        // Confirmation remains usable by head dwell even with clicks paused.
+        self.enabled = false;
+        self.command(self.hwnd, 212, 0);
+        let mut confirm: RECT = zeroed();
+        GetWindowRect(GetDlgItem(messages::pause_window(), 1), &mut confirm);
+        let centre = (
+            (confirm.left + confirm.right) / 2,
+            (confirm.top + confirm.bottom) / 2,
+        );
         self.button(MouseButton::Left, true);
         self.pending_input
             .extend(click_sequence(now() + 500, MouseButton::Left, 3, 10, 50));
-        self.command(self.bar, 212, 0);
+        let start = now();
+        self.pointer_actions(start, MotionOutput::default(), centre, Some(centre));
+        assert!(!self.full_paused);
+        self.pointer_actions(
+            start + self.config.profile().click.dwell_ms,
+            MotionOutput::default(),
+            centre,
+            Some(centre),
+        );
         assert!(self.full_paused);
         assert!(self.pending_input.is_empty());
         assert!(!self.injected.iter().any(|pressed| *pressed));
@@ -2187,9 +2329,23 @@ impl App {
             self.full_paused,
             "dwell must not automatically resume full pause"
         );
-        self.command(self.bar, 212, 0);
+        self.command(self.hwnd, 212, 0);
+        assert!(
+            self.full_paused,
+            "opening resume confirmation changed the pause state"
+        );
+        SendMessageW(messages::pause_window(), WM_COMMAND, 1, 0);
+        self.apply_pause_answer();
         assert!(!self.full_paused);
-        assert_eq!(self.enabled, enabled);
+        assert!(!self.enabled, "resuming changed click-only pause");
+        self.enabled = enabled;
+        self.command(self.hwnd, 212, 0);
+        self.toggle_full_pause();
+        assert!(
+            messages::pause_window().is_null(),
+            "hotkey left a stale confirmation"
+        );
+        self.toggle_full_pause();
         ShowWindow(self.bar, SW_HIDE);
         self.keep_bar_visible();
         assert_ne!(
@@ -2284,7 +2440,7 @@ impl App {
         }
         match id {
             ENABLE | 210 | 201 => self.toggle(),
-            212 => self.toggle_full_pause(),
+            212 => messages::confirm_pause(self.hwnd, !self.full_paused),
             OPTIONS => self.open_options(),
             KEYBOARD => {
                 if self.dry_run {
@@ -2779,6 +2935,7 @@ impl App {
             &["Top", "Bottom", "Left", "Right", "Floating"],
             p.bar_position as usize,
         );
+        self.check(3, 3, 468, "Show SketchUp buttons", p.show_sketchup_buttons);
         self.note(3, 4, "The click bar stays visible until robocam exits.");
         self.check(
             3,
@@ -3086,6 +3243,7 @@ impl App {
             p.bar_position = self.selected(452) as u8;
             p.show_bar = true;
             p.high_contrast_bar = self.checked(466);
+            p.show_sketchup_buttons = self.checked(468);
             p.keyboard_command = text(GetDlgItem(self.options, 455));
             p.enabled_at_startup = Some(self.checked(459));
             let key = |id| {
