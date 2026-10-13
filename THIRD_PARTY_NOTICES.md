@@ -10,6 +10,20 @@ robocam is distributed under GPL-3.0-or-later; the complete license is in `LICEN
 Packages include corresponding robocam sources and build scripts. The icons are
 original artwork created for robocam.
 
+## eViacam click audio
+
+`assets/sounds/eviacam-click.wav` and `assets/sounds/eviacam-drag.wav` are unchanged
+copies of `doc/click.wav` and `doc/click2.wav` from Enable Viacam (eViacam), by
+Cesar Mauri Loba / CREA Software Systems and contributors, under GPL-3.0-or-later.
+Source: <https://github.com/cmauri/eviacam/tree/a4032ed9c59def5399a93e74f5ea84513d2f42b1>.
+The complete GPL is included in `LICENSE`; corresponding audio files are included
+in the source package and embedded in the executable.
+
+SHA-256:
+
+- `eviacam-click.wav`: `e56256acbefdd32ffb21e49e30d77bb8c4cba73ae686eaa2639578953b739cea`
+- `eviacam-drag.wav`: `7f6c4dad4a7a648d3c4d77d17b23b322d1e6ef1292faf52390072d07ed067a82`
+
 ## OpenCV and face detector
 
 - OpenCV 4.10.0: <https://github.com/opencv/opencv/tree/4.10.0>

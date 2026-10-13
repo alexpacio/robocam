@@ -22,6 +22,7 @@ pub struct Profile {
     pub high_contrast_bar: bool,
     pub show_bar: bool,
     pub click_sound: bool,
+    pub black_cursor_on_click: bool,
     pub pause_on_mouse_ms: u64,
     pub keyboard_command: String,
     pub toggle_key: u32,
@@ -52,6 +53,7 @@ impl Default for Profile {
             high_contrast_bar: false,
             show_bar: true,
             click_sound: true,
+            black_cursor_on_click: false,
             pause_on_mouse_ms: 1000,
             keyboard_command: "osk.exe".into(),
             toggle_key: 0x7A,
@@ -413,6 +415,16 @@ mod tests {
         assert_eq!(settings.profile().camera_index, 2);
         assert!(!settings.enabled_at_startup);
         assert_eq!(settings.profile().click.dwell_ms, 1000);
+        assert!(!settings.profile().black_cursor_on_click);
+    }
+    #[test]
+    fn click_cursor_preference_is_saved_per_profile() {
+        let mut settings = Settings::default();
+        settings.profile_mut().black_cursor_on_click = true;
+        let loaded: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert!(loaded.profile().black_cursor_on_click);
+        assert!(!loaded.profiles[ROBO_PROFILE_NAME].black_cursor_on_click);
     }
     #[test]
     fn profile_roundtrip_preserves_independent_settings() {

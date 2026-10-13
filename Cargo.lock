@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "robocam"
-version = "0.3.0"
+version = "0.4.2"
 dependencies = [
  "opencv",
  "semver",

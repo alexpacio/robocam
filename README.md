@@ -35,13 +35,14 @@ The toolbar fills the screen width, keeps buttons on the left and reserves deskt
 space so maximized windows do not overlap it. The order is:
 
 1. Play/pause (one button that changes with the current state).
-2. Single left, double left, triple left.
-3. Drag (four-arrow cross), middle click, wheel scrolling.
-4. SketchUp group/component editing, right click, main window.
+2. Single left, double left, SketchUp group/component editing, triple left.
+3. Right click, drag (four-arrow cross), middle click, wheel scrolling.
+4. Main window.
 
-The bar stays visible when the webcam window is minimized or hidden. Automatic
-hiding is no longer used, including for saved profiles that enabled it. The main
-window button always restores and brings the webcam window to the foreground.
+The bar stays visible until robocam exits, including Show Desktop, desktop Peek,
+and minimizing or hiding the webcam window. Old hide-bar preferences are ignored.
+Minimizing the webcam window removes its taskbar button and leaves robocam in the tray. The main
+window button and tray icon restore and bring the webcam window to the foreground.
 Keyboard, configuration, setup and help remain available in the main window.
 
 In **Configuration > Click**, **Dwell time** controls the wait before a click;
@@ -50,11 +51,21 @@ lasts, including double/triple and SketchUp clicks. Both are saved per profile.
 Existing profiles keep their previous press timing until edited. Very long presses
 can exceed Windows' double-click interval and be recognized as separate clicks.
 
-Mouse icons have three buttons plus a central wheel; the relevant button/wheel is
-red. There is no floating cursor progress bar.
+Below **Play a sound on click**, enable **Black cursor with gray outline during
+click** to show a black pointer for the complete click action, including gaps in
+double/triple clicks and while dragging. It returns to the normal cursor when the
+action finishes or is cancelled. This option is saved per profile and starts off.
+Zero-duration clicks also have zero-duration cursor feedback. Click sounds use
+eViacam's original audio, embedded in the executable.
+
+Mouse icons have three buttons with the wheel inside the middle one; the relevant
+button or wheel is red. Double and triple clicks carry a 2 or 3 badge at the bottom
+right, where drag and scroll show their arrows. The selected action has a mint
+button with a teal marker, a locked action adds a padlock badge, and pause turns
+Play/Pause amber and dims the click actions. There is no floating cursor progress bar.
 
 For greater visibility, enable **Configuration > Click bar > High-contrast bar
-(black background)** and press **Save**. The bar uses thicker white icons, yellow
+(black background)** and press **Save**. The bar uses thin white icon outlines, yellow
 selection markers, and bright red mouse-button highlights on black. This option
 also works with compact text buttons and is remembered separately for each profile.
 

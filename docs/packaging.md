@@ -50,8 +50,13 @@ PATH, isolated settings and input/camera capture disabled. It requires the nativ
 windows/options/toolbar to open and shut down cleanly before creating artifacts.
 
 CI runs formatting, Clippy, tests, release compilation and installer packaging
-on `windows-2022`. Its artifacts are unsigned builds. Release signing, publishing
-GitHub releases and hardware-based camera acceptance are separate release steps.
+on `windows-2022`. Its artifacts are unsigned builds. Tags named `vX.Y.Z` must
+match Cargo, installer, Windows manifest and a dated changelog entry, and the
+tagged commit must belong to `main`. After building that exact commit, CI uploads
+the installer, portable archive, source archive and checksums to a draft GitHub
+Release, then publishes it as latest. The version's changelog entry is used as
+the release notes. Published tags/releases are never overwritten.
+Hardware-based camera acceptance and release signing remain separate checks.
 The application checks `alexpacio/robocam` GitHub releases when requested; a 404
 means that no public release has been published yet.
 

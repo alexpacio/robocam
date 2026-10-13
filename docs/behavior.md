@@ -15,10 +15,14 @@ saved camera selects automatic mode; Save applies the reset.
 
 ## Clicking and pause
 
-The first six toolbar actions are single left, double left, triple left, drag,
-middle and scroll. The SketchUp action follows, then pause, no-click, right click,
-main window, keyboard, configuration, setup and help. Icons have three mouse buttons
-and a separate wheel; the relevant button or wheel is red. Drag has four arrows.
+The toolbar order is Play/Pause, single left, double left, SketchUp, triple left,
+right click, drag, middle, scroll and main window. Keyboard, configuration, setup
+and help are available in the main window. Icons have three mouse buttons with
+the wheel inside the middle one; the relevant button or wheel is red. Modifiers sit
+at the bottom right: a 2/3 badge for double/triple, four arrows for drag and an
+up/down arrow for scroll. SketchUp is a cube with a red top face and a 2 badge.
+State is shown by the button face: mint with a teal marker when selected, a
+padlock badge when locked, and amber Play/Pause with dimmed click icons when paused.
 
 Pause disables desktop clicks, releases held buttons and cancels pending actions.
 Camera acquisition and head-driven pointer movement continue. Dwelling on Play
@@ -31,6 +35,21 @@ movement followed by another dwell. Scrolling freezes the pointer and maps head
 motion to wheel input until the next moved-then-stopped dwell. There is no cursor
 progress overlay. Zero-delay clicks are dispatched in the frame that completes
 the dwell countdown.
+
+Head-controlled hit testing uses the cursor position confirmed by Windows after
+movement. If input is still queued or constrained to another position, dwelling is
+reset until the move lands. Absolute input uses the full physical virtual desktop,
+including the click bar; the reduced work area is only for placing application
+windows. Toolbar buttons run local commands without moving or clicking the pointer
+in the window underneath, and gaps/padding also suppress desktop dwell.
+
+The optional black cursor with gray outline is below click sound in Click settings.
+It lasts from action dispatch through the last release, including multi-click gaps
+and held drag buttons. Cancellation, pause, profile changes and shutdown restore
+the normal cursor. Zero-duration actions do not add an artificial highlight delay.
+The replacement is a transparent, non-activating window; it does not receive clicks
+or change the user's saved Windows cursor scheme. Sound feedback uses the embedded
+original eViacam click audio, with its alternate sound when starting a drag.
 
 SketchUp mode checks the application under the pointer, activates its Select tool
 with Space, then sends a paced left double click at a fixed position. If foreground
@@ -46,9 +65,15 @@ OpenCV internal parallelism is limited to one thread. Realtime scheduling does n
 guarantee responsiveness when camera drivers or other hardware stall.
 
 The toolbar is a Shell AppBar. Top/bottom docking spans monitor width and reserves
-desktop work area; buttons start at the left. Hiding/removing the bar releases its
-reservation. Main icons use 32 logical pixels and normal click icons use 48, with
-per-monitor DPI scaling. Calibration uses the same fresh-tracking readiness as
+desktop work area; buttons start at the left. It stays visible through Show Desktop,
+Peek and minimization; only application shutdown removes its reservation. The main
+window minimizes to the tray and can be restored by the last bar button or tray icon.
+Main icons use 28 logical pixels in 36-pixel buttons and click icons
+use 40 in 48-pixel buttons. They share a 48-unit grid with round caps and joins,
+with per-monitor DPI scaling. GDI does not antialias, so each button is painted at
+four times its size and reduced with HALFTONE; compact labels and focus outlines
+are drawn afterwards at the real size. Window and tray icons are loaded from the
+embedded frame for the current DPI and replaced on WM_DPICHANGED. Calibration uses the same fresh-tracking readiness as
 pointer control and pauses movement only during its measurement periods.
 
 ## Verification checklist
@@ -64,8 +89,20 @@ pointer control and pauses movement only during its measurement periods.
 5. Verify clicks in elevated Task Manager and the Windows on-screen keyboard.
 6. Confirm the AppBar spans the monitor and maximized windows remain below it.
 7. Verify the highest-privilege login task and Realtime priority in diagnostics.
+8. Enable cursor feedback, test timed single/multi-clicks and dragging, then cancel
+   using pause or tracking loss. Check restoration and independent profile settings.
+   Compare light/dark toolbar outlines and the fourth-position SketchUp button.
 
 Unit tests cover timing, selection, gesture actions, device identity, persistence,
 version checks and real OpenCV tracking on synthetic frames. Package smoke tests
 cover native startup and shutdown without input injection. Hardware, target-app
 behavior and monitor combinations also require runtime checks.
+
+The ignored `native_cursor_lifecycle` test requires an interactive Windows desktop;
+it briefly displays feedback without injecting input, checks that it cannot take
+focus or intercept the click target, then restores the cursor (also on test panic).
+
+`--desktop-test --smoke-report <path>` additionally toggles Windows Show Desktop,
+checks that the toolbar remains the actual hit-test target while the main window
+is hidden, restores the desktop and verifies reopening the main window. Run this
+only in an interactive session; it briefly rearranges that session's windows.

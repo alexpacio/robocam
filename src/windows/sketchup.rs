@@ -75,5 +75,7 @@ impl App {
             press,
             gap.saturating_sub(10),
         ));
+        self.update_click_cursor();
+        self.play_click_sound(false);
     }
 }

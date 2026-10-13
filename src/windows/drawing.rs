@@ -10,10 +10,35 @@ const PAPER: u32 = color(246, 248, 249);
 const INK: u32 = color(45, 60, 65);
 const TEAL: u32 = color(0, 113, 105);
 const SELECTED: u32 = color(216, 241, 235);
+const PRESSED: u32 = color(189, 225, 216);
+const PAUSED: u32 = color(252, 233, 196);
+const PAUSED_MARK: u32 = color(166, 95, 0);
 const MUTED: u32 = color(124, 137, 143);
+const RED: u32 = color(215, 35, 42);
 const WHITE: u32 = color(255, 255, 255);
 const BLACK: u32 = color(0, 0, 0);
 const YELLOW: u32 = color(255, 230, 0);
+const CONTRAST_RED: u32 = color(255, 90, 90);
+const CONTRAST_MUTED: u32 = color(143, 143, 143);
+const CONTRAST_PRESSED: u32 = color(42, 42, 42);
+
+/// GDI draws aliased curves; buttons render at this factor and are averaged down.
+const SUPERSAMPLE: i32 = 4;
+
+/// Everything about a toolbar button's state that its artwork depends on.
+struct ButtonLook {
+    id: u16,
+    power: bool,
+    active: bool,
+    pressed: bool,
+    on_bar: bool,
+    high_contrast: bool,
+    compact: bool,
+    locked: bool,
+    face: u32,
+    color: u32,
+    accent: u32,
+}
 
 /// A compatible surface avoids partially drawn icons and camera frames.
 struct BufferedDc {
@@ -60,6 +85,47 @@ unsafe fn fill(dc: HDC, rectangle: RECT, color: u32) {
     }
 }
 
+/// Fills a rounded rectangle without an outline.
+unsafe fn fill_round(dc: HDC, rectangle: RECT, radius: i32, color: u32) {
+    let brush = CreateSolidBrush(color);
+    if brush.is_null() {
+        return;
+    }
+    let previous_brush = SelectObject(dc, brush);
+    let previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    // A null pen excludes the right and bottom edges from the interior.
+    RoundRect(
+        dc,
+        rectangle.left,
+        rectangle.top,
+        rectangle.right + 1,
+        rectangle.bottom + 1,
+        radius * 2,
+        radius * 2,
+    );
+    SelectObject(dc, previous_pen);
+    SelectObject(dc, previous_brush);
+    DeleteObject(brush);
+}
+
+unsafe fn outline_round(dc: HDC, rectangle: RECT, radius: i32, color: u32, width: i32) {
+    let pen = CreatePen(PS_INSIDEFRAME, width, color);
+    let previous_pen = SelectObject(dc, pen);
+    let previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    RoundRect(
+        dc,
+        rectangle.left,
+        rectangle.top,
+        rectangle.right,
+        rectangle.bottom,
+        radius * 2,
+        radius * 2,
+    );
+    SelectObject(dc, previous_brush);
+    SelectObject(dc, previous_pen);
+    DeleteObject(pen);
+}
+
 unsafe fn label(dc: HDC, text: &str, rectangle: RECT, color: u32, flags: u32) {
     let text = wide(text);
     let mut rectangle = rectangle;
@@ -97,168 +163,7 @@ impl App {
         if item.CtlID == u32::from(PREVIEW) {
             self.draw_preview(dc, rectangle, item.hwndItem);
         } else {
-            let id = item.CtlID as u16;
-            let action = BAR_ACTIONS
-                .iter()
-                .find(|(control, _, _)| *control == id)
-                .map(|(_, _, action)| *action);
-            let active = match id {
-                ENABLE | 210 => self.enabled,
-                201 => !self.enabled,
-                BAR => self.config.profile().show_bar,
-                207 => self.click.drag_enabled(),
-                208 => self.click.scrolling() || self.click.selected() == ClickAction::Scroll,
-                _ => action.is_some_and(|action| self.click.selected() == action),
-            };
-            let pressed = item.itemState & ODS_SELECTED != 0;
-            let disabled = item.itemState & ODS_DISABLED != 0;
-            let high_contrast =
-                GetParent(item.hwndItem) == self.bar && self.config.profile().high_contrast_bar;
-            fill(
-                dc,
-                rectangle,
-                if high_contrast {
-                    BLACK
-                } else if pressed {
-                    rgb(189, 225, 216)
-                } else if active {
-                    SELECTED
-                } else {
-                    PAPER
-                },
-            );
-            if active {
-                fill(
-                    dc,
-                    RECT {
-                        left: 0,
-                        top: height - scale(3, dpi),
-                        right: width,
-                        bottom: height,
-                    },
-                    if high_contrast { YELLOW } else { TEAL },
-                );
-            }
-            if high_contrast && (active || pressed) {
-                outline_rectangle(dc, rectangle, YELLOW, scale(2, dpi));
-            }
-            let icon_size = scale(if id >= 200 { 48 } else { 32 }, dpi)
-                .min(width)
-                .min(height);
-            let offset = scale(i32::from(pressed), dpi);
-            let color = if high_contrast {
-                if disabled {
-                    rgb(170, 170, 170)
-                } else if active || pressed {
-                    YELLOW
-                } else {
-                    WHITE
-                }
-            } else if disabled {
-                MUTED
-            } else if active {
-                TEAL
-            } else {
-                INK
-            };
-            let mut icon = Outline::new(
-                dc,
-                [
-                    (width - icon_size) / 2 + offset,
-                    (height - icon_size) / 2 + offset,
-                    icon_size,
-                ],
-                color,
-                dpi,
-                high_contrast,
-            );
-            let compact = high_contrast && self.config.profile().thin_bar;
-            if compact {
-                label(
-                    dc,
-                    &text(item.hwndItem),
-                    rectangle,
-                    color,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-            } else {
-                match id {
-                    ENABLE | 210 => icon.power(self.enabled),
-                    OPTIONS => icon.sliders(),
-                    KEYBOARD => icon.keyboard(),
-                    WIZARD => icon.wand(),
-                    BAR => icon.bar(),
-                    HELP => icon.help(),
-                    209 => icon.robot(),
-                    201 => {
-                        icon.mouse(0);
-                        icon.line(7, 40, 41, 7);
-                    }
-                    202 => {
-                        icon.mouse(1);
-                        icon.number("1");
-                    }
-                    203 => icon.mouse(2),
-                    204 => icon.mouse(3),
-                    205 => {
-                        icon.mouse(1);
-                        icon.number("2");
-                    }
-                    206 => {
-                        icon.mouse(1);
-                        icon.number("3");
-                    }
-                    207 => {
-                        icon.mouse(match self.click.drag_button() {
-                            MouseButton::Left => 1,
-                            MouseButton::Middle => 2,
-                            MouseButton::Right => 3,
-                        });
-                        icon.arrow(35, 33, 26, 33);
-                        icon.arrow(35, 33, 44, 33);
-                        icon.arrow(35, 33, 35, 24);
-                        icon.arrow(35, 33, 35, 42);
-                    }
-                    208 => {
-                        icon.mouse(4);
-                        icon.arrow(38, 23, 38, 7);
-                        icon.arrow(38, 27, 38, 43);
-                    }
-                    211 => {
-                        icon.mouse(1);
-                        icon.number("SU");
-                    }
-                    _ => {}
-                }
-            }
-            if action.is_some_and(|action| self.click.locked() == action) {
-                if compact {
-                    outline_rectangle(
-                        dc,
-                        RECT {
-                            left: scale(4, dpi),
-                            top: scale(4, dpi),
-                            right: width - scale(4, dpi),
-                            bottom: height - scale(4, dpi),
-                        },
-                        color,
-                        scale(1, dpi),
-                    );
-                } else {
-                    icon.lock();
-                }
-            }
-            drop(icon);
-            if item.itemState & ODS_FOCUS != 0 {
-                let margin = scale(2, dpi);
-                let focus = RECT {
-                    left: margin,
-                    top: margin,
-                    right: width - margin,
-                    bottom: height - margin,
-                };
-                DrawFocusRect(dc, &focus);
-            }
+            self.draw_button(item, dc, width, height, dpi);
         }
         RestoreDC(dc, saved);
         BitBlt(
@@ -272,6 +177,275 @@ impl App {
             0,
             SRCCOPY,
         );
+    }
+
+    unsafe fn draw_button(
+        &self,
+        item: &DRAWITEMSTRUCT,
+        dc: HDC,
+        width: i32,
+        height: i32,
+        dpi: u32,
+    ) {
+        let id = item.CtlID as u16;
+        let action = BAR_ACTIONS
+            .iter()
+            .find(|(control, _, _)| *control == id)
+            .map(|(_, _, action)| *action);
+        let power = matches!(id, ENABLE | 210);
+        // Pause is the state that matters most, so it is the active one.
+        let paused = !self.enabled;
+        let active = match id {
+            ENABLE | 210 | 201 => paused,
+            BAR => true,
+            207 => self.click.drag_enabled(),
+            208 => self.click.scrolling() || self.click.selected() == ClickAction::Scroll,
+            _ => action.is_some_and(|action| self.click.selected() == action),
+        };
+        let pressed = item.itemState & ODS_SELECTED != 0;
+        let disabled =
+            item.itemState & ODS_DISABLED != 0 || (paused && matches!(id, 202..=208 | 211));
+        let on_bar = GetParent(item.hwndItem) == self.bar;
+        let high_contrast = on_bar && self.config.profile().high_contrast_bar;
+        // State lives in the button face; the drawing keeps its ink colour.
+        let face = if high_contrast {
+            if pressed { CONTRAST_PRESSED } else { BLACK }
+        } else if pressed {
+            PRESSED
+        } else if active && power {
+            PAUSED
+        } else if active {
+            SELECTED
+        } else {
+            PAPER
+        };
+        let color = if high_contrast {
+            if disabled {
+                CONTRAST_MUTED
+            } else if active || pressed {
+                YELLOW
+            } else {
+                WHITE
+            }
+        } else if disabled {
+            MUTED
+        } else {
+            INK
+        };
+        let look = ButtonLook {
+            id,
+            power,
+            active,
+            pressed,
+            on_bar,
+            high_contrast,
+            compact: high_contrast && self.config.profile().thin_bar,
+            locked: action.is_some_and(|action| self.click.locked() == action),
+            face,
+            color,
+            accent: if disabled {
+                color
+            } else if high_contrast {
+                CONTRAST_RED
+            } else {
+                RED
+            },
+        };
+        // GDI does not antialias, so the artwork is drawn larger and averaged down.
+        let (large_width, large_height) = (width * SUPERSAMPLE, height * SUPERSAMPLE);
+        match BufferedDc::new(item.hDC, large_width, large_height) {
+            Some(large) => {
+                let large_dpi = dpi * SUPERSAMPLE as u32;
+                self.paint_button(large.dc, &look, large_width, large_height, large_dpi);
+                SetStretchBltMode(dc, HALFTONE);
+                SetBrushOrgEx(dc, 0, 0, null_mut());
+                StretchBlt(
+                    dc,
+                    0,
+                    0,
+                    width,
+                    height,
+                    large.dc,
+                    0,
+                    0,
+                    large_width,
+                    large_height,
+                    SRCCOPY,
+                );
+            }
+            None => self.paint_button(dc, &look, width, height, dpi),
+        }
+        // Text and keyboard focus stay pixel-exact at the real size.
+        if look.compact {
+            let rectangle = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            label(
+                dc,
+                &text(item.hwndItem),
+                rectangle,
+                color,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+            if look.locked {
+                outline_rectangle(
+                    dc,
+                    RECT {
+                        left: scale(4, dpi),
+                        top: scale(4, dpi),
+                        right: width - scale(4, dpi),
+                        bottom: height - scale(4, dpi),
+                    },
+                    color,
+                    scale(1, dpi),
+                );
+            }
+        }
+        if item.itemState & ODS_FOCUS != 0 {
+            let margin = scale(2, dpi);
+            let focus = RECT {
+                left: margin,
+                top: margin,
+                right: width - margin,
+                bottom: height - margin,
+            };
+            DrawFocusRect(dc, &focus);
+        }
+    }
+
+    unsafe fn paint_button(&self, dc: HDC, look: &ButtonLook, width: i32, height: i32, dpi: u32) {
+        let rectangle = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        fill(
+            dc,
+            rectangle,
+            if look.high_contrast {
+                BLACK
+            } else {
+                GetSysColor(COLOR_BTNFACE)
+            },
+        );
+        let radius = scale(if look.on_bar { 10 } else { 8 }, dpi);
+        fill_round(dc, rectangle, radius, look.face);
+        if look.active {
+            let thickness = scale(if look.on_bar { 3 } else { 2 }, dpi);
+            let inset = width * 29 / 100;
+            fill_round(
+                dc,
+                RECT {
+                    left: inset,
+                    top: height - 2 * thickness,
+                    right: width - inset,
+                    bottom: height - thickness,
+                },
+                thickness / 2,
+                if look.high_contrast {
+                    YELLOW
+                } else if look.power {
+                    PAUSED_MARK
+                } else {
+                    TEAL
+                },
+            );
+        }
+        if look.high_contrast && (look.active || look.pressed) {
+            outline_round(dc, rectangle, radius, YELLOW, scale(2, dpi));
+        }
+        if look.compact {
+            return;
+        }
+        let icon_size = scale(if look.id >= 200 { 40 } else { 28 }, dpi)
+            .min(width)
+            .min(height);
+        let offset = scale(i32::from(look.pressed), dpi);
+        // Smaller icons get relatively heavier strokes to stay legible.
+        let units = if icon_size >= scale(36, dpi) {
+            2.5
+        } else {
+            3.0
+        };
+        let stroke = ((units * icon_size as f32 / 48.0).round() as i32).max(1);
+        let icon = Outline::new(
+            dc,
+            [
+                (width - icon_size) / 2 + offset,
+                (height - icon_size) / 2 + offset,
+                icon_size,
+            ],
+            [look.color, look.accent, look.face],
+            stroke,
+        );
+        match look.id {
+            ENABLE | 210 => icon.power(self.enabled),
+            OPTIONS => icon.sliders(),
+            KEYBOARD => icon.keyboard(),
+            WIZARD => icon.wand(),
+            BAR => icon.bar(),
+            HELP => icon.help(),
+            209 => icon.robot(),
+            201 => {
+                icon.mouse(None, false);
+                icon.line((7.0, 41.0), (41.0, 7.0));
+            }
+            // The single click is the base case and carries no badge.
+            202 => icon.mouse(Some(MouseButton::Left), false),
+            203 => icon.mouse(Some(MouseButton::Middle), false),
+            204 => icon.mouse(Some(MouseButton::Right), false),
+            205 => {
+                icon.mouse(Some(MouseButton::Left), false);
+                icon.badge("2");
+            }
+            206 => {
+                icon.mouse(Some(MouseButton::Left), false);
+                icon.badge("3");
+            }
+            207 => {
+                icon.mouse(Some(self.click.drag_button()), false);
+                icon.drag();
+            }
+            208 => {
+                icon.mouse(None, true);
+                icon.scroll();
+            }
+            211 => {
+                icon.component();
+                icon.badge("2");
+            }
+            _ => {}
+        }
+        if look.locked {
+            // Bottom left keeps the lock off the highlighted button,
+            // the bottom-right modifiers and the active marker.
+            let size = scale(16, dpi);
+            let margin = scale(3, dpi);
+            let top = height - scale(24, dpi);
+            let ring = scale(2, dpi);
+            fill_round(
+                dc,
+                RECT {
+                    left: margin - ring,
+                    top: top - ring,
+                    right: margin + size + ring,
+                    bottom: top + size + ring,
+                },
+                scale(5, dpi) + ring,
+                look.face,
+            );
+            let (chip, ink) = if look.high_contrast {
+                (YELLOW, BLACK)
+            } else {
+                (TEAL, WHITE)
+            };
+            let stroke = ((1.8 * size as f32 / 16.0).round() as i32).max(1);
+            Outline::new(dc, [margin, top, size], [ink, ink, chip], stroke).lock();
+        }
     }
 
     unsafe fn draw_preview(&self, dc: HDC, rectangle: RECT, hwnd: HWND) {
@@ -418,39 +592,37 @@ unsafe fn outline_rectangle(dc: HDC, rectangle: RECT, color: u32, width: i32) {
     DeleteObject(pen);
 }
 
+type Point = (f32, f32);
+
+/// Strokes artwork drawn on a 48-unit grid with round caps and joins.
 struct Outline {
     dc: HDC,
     x: i32,
     y: i32,
     size: i32,
     color: u32,
-    high_contrast: bool,
+    accent: u32,
+    paper: u32,
     pen: HPEN,
     previous_pen: HGDIOBJ,
     previous_brush: HGDIOBJ,
 }
 
 impl Outline {
-    unsafe fn new(
-        dc: HDC,
-        [x, y, size]: [i32; 3],
-        color: u32,
-        dpi: u32,
-        high_contrast: bool,
-    ) -> Self {
-        let pen = CreatePen(
-            PS_SOLID,
-            scale(
-                if high_contrast {
-                    3
-                } else if size >= scale(28, dpi) {
-                    2
-                } else {
-                    1
-                },
-                dpi,
-            ),
-            color,
+    /// `colors` are the ink, the red for the involved part and the face behind the icon.
+    unsafe fn new(dc: HDC, [x, y, size]: [i32; 3], colors: [u32; 3], stroke: i32) -> Self {
+        let [color, accent, paper] = colors;
+        let brush = LOGBRUSH {
+            lbStyle: BS_SOLID,
+            lbColor: color,
+            lbHatch: 0,
+        };
+        let pen = ExtCreatePen(
+            (PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND) as u32,
+            stroke.max(1) as u32,
+            &brush,
+            0,
+            null(),
         );
         let previous_pen = SelectObject(dc, pen);
         let previous_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
@@ -460,202 +632,273 @@ impl Outline {
             y,
             size,
             color,
-            high_contrast,
+            accent,
+            paper,
             pen,
             previous_pen,
             previous_brush,
         }
     }
 
-    fn px(&self, value: i32) -> i32 {
-        self.x + value * self.size / 48
-    }
-    fn py(&self, value: i32) -> i32 {
-        self.y + value * self.size / 48
+    fn unit(&self, value: f32) -> i32 {
+        (value * self.size as f32 / 48.0).round() as i32
     }
 
-    unsafe fn line(&self, x1: i32, y1: i32, x2: i32, y2: i32) {
-        MoveToEx(self.dc, self.px(x1), self.py(y1), null_mut());
-        LineTo(self.dc, self.px(x2), self.py(y2));
+    fn point(&self, (x, y): Point) -> POINT {
+        POINT {
+            x: self.x + self.unit(x),
+            y: self.y + self.unit(y),
+        }
     }
 
-    unsafe fn round(&self, x: i32, y: i32, w: i32, h: i32, radius: i32) {
-        RoundRect(
-            self.dc,
-            self.px(x),
-            self.py(y),
-            self.px(x + w),
-            self.py(y + h),
-            radius * self.size / 48,
-            radius * self.size / 48,
-        );
+    /// Samples a circular arc; angles grow clockwise on screen, in degrees.
+    fn arc(center: Point, radius: f32, from: f32, to: f32) -> Vec<Point> {
+        const STEPS: usize = 16;
+        (0..=STEPS)
+            .map(|step| {
+                let angle = (from + (to - from) * step as f32 / STEPS as f32).to_radians();
+                (
+                    center.0 + radius * angle.cos(),
+                    center.1 + radius * angle.sin(),
+                )
+            })
+            .collect()
     }
 
-    unsafe fn circle(&self, x: i32, y: i32, diameter: i32, solid: bool) {
-        let brush = if solid {
-            CreateSolidBrush(self.color)
-        } else {
+    unsafe fn polyline(&self, points: &[Point]) {
+        let points: Vec<POINT> = points.iter().map(|point| self.point(*point)).collect();
+        Polyline(self.dc, points.as_ptr(), points.len() as i32);
+    }
+
+    unsafe fn polygon(&self, points: &[Point]) {
+        let points: Vec<POINT> = points.iter().map(|point| self.point(*point)).collect();
+        Polygon(self.dc, points.as_ptr(), points.len() as i32);
+    }
+
+    unsafe fn line(&self, from: Point, to: Point) {
+        self.polyline(&[from, to]);
+    }
+
+    unsafe fn round(&self, (x, y): Point, (w, h): Point, radius: f32) {
+        let start = self.point((x, y));
+        let end = self.point((x + w, y + h));
+        let diameter = self.unit(radius * 2.0);
+        RoundRect(self.dc, start.x, start.y, end.x, end.y, diameter, diameter);
+    }
+
+    unsafe fn circle(&self, (x, y): Point, radius: f32) {
+        let start = self.point((x - radius, y - radius));
+        let end = self.point((x + radius, y + radius));
+        Ellipse(self.dc, start.x, start.y, end.x, end.y);
+    }
+
+    /// Runs `draw` with a solid brush and, unless `outlined`, without the pen.
+    unsafe fn filled(&self, color: u32, outlined: bool, draw: impl FnOnce()) {
+        let brush = CreateSolidBrush(color);
+        if brush.is_null() {
+            return;
+        }
+        let previous_brush = SelectObject(self.dc, brush);
+        let previous_pen = if outlined {
             null_mut()
-        };
-        let previous = if solid {
-            SelectObject(self.dc, brush)
         } else {
-            null_mut()
+            SelectObject(self.dc, GetStockObject(NULL_PEN))
         };
-        Ellipse(
-            self.dc,
-            self.px(x),
-            self.py(y),
-            self.px(x + diameter),
-            self.py(y + diameter),
-        );
-        if solid {
-            SelectObject(self.dc, previous);
-            DeleteObject(brush);
+        draw();
+        if !outlined {
+            SelectObject(self.dc, previous_pen);
         }
-    }
-
-    unsafe fn arrow(&self, x1: i32, y1: i32, x2: i32, y2: i32) {
-        self.line(x1, y1, x2, y2);
-        if x1 == x2 {
-            let tail = if y1 < y2 { y2 - 5 } else { y2 + 5 };
-            self.line(x2 - 4, tail, x2, y2);
-            self.line(x2 + 4, tail, x2, y2);
-        } else {
-            let tail = if x1 < x2 { x2 - 5 } else { x2 + 5 };
-            self.line(tail, y2 - 4, x2, y2);
-            self.line(tail, y2 + 4, x2, y2);
-        }
-    }
-
-    unsafe fn mouse(&self, button: u8) {
-        self.round(9, 4, 29, 40, 16);
-        self.line(19, 6, 19, 23);
-        self.line(28, 6, 28, 23);
-        self.line(10, 23, 37, 23);
-        let red = if self.high_contrast {
-            rgb(255, 70, 70)
-        } else {
-            rgb(215, 35, 42)
-        };
-        let region = match button {
-            1 => Some((11, 8, 7, 13)),
-            2 => Some((21, 6, 6, 17)),
-            3 => Some((29, 8, 7, 13)),
-            _ => None,
-        };
-        if let Some((x, y, w, h)) = region {
-            let brush = CreateSolidBrush(red);
-            let old = SelectObject(self.dc, brush);
-            self.round(x, y, w, h, 3);
-            SelectObject(self.dc, old);
-            DeleteObject(brush);
-        }
-        // The central button and wheel are distinct parts of the drawing.
-        let brush = CreateSolidBrush(if button == 4 {
-            red
-        } else if self.high_contrast {
-            BLACK
-        } else {
-            rgb(242, 242, 242)
-        });
-        let old = SelectObject(self.dc, brush);
-        self.round(22, 10, 4, 9, 3);
-        SelectObject(self.dc, old);
+        SelectObject(self.dc, previous_brush);
         DeleteObject(brush);
-        self.line(22, 13, 26, 13);
-        self.line(22, 16, 26, 16);
     }
 
-    unsafe fn number(&self, number: &str) {
-        self.circle(29, 28, 16, true);
+    unsafe fn dot(&self, center: Point, radius: f32) {
+        self.filled(self.color, false, || self.circle(center, radius));
+    }
+
+    /// Clears the face behind a modifier so it reads in front of the drawing.
+    unsafe fn knockout(&self, center: Point, radius: f32) {
+        self.filled(self.paper, false, || self.circle(center, radius));
+    }
+
+    /// Three buttons and a separate wheel; the involved part is red.
+    unsafe fn mouse(&self, button: Option<MouseButton>, wheel: bool) {
+        // Button edges sit where x = 15 and x = 25 meet the 24 × 38 body's top arc.
+        const TOP: Point = (20.0, 15.0);
+        let (from, to, near, far) = match button {
+            Some(MouseButton::Left) => (180.0, 245.4, 8.0, 15.0),
+            Some(MouseButton::Middle) => (245.4, 294.6, 15.0, 25.0),
+            Some(MouseButton::Right) => (294.6, 360.0, 25.0, 32.0),
+            None => (0.0, 0.0, 0.0, 0.0),
+        };
+        if button.is_some() {
+            let mut region = vec![(near, 20.0)];
+            region.extend(Self::arc(TOP, 12.0, from, to));
+            region.push((far, 20.0));
+            self.filled(self.accent, false, || self.polygon(&region));
+        }
+        self.round((8.0, 3.0), (24.0, 38.0), 12.0);
+        self.line((8.0, 20.0), (32.0, 20.0));
+        self.line((15.0, 4.1), (15.0, 20.0));
+        self.line((25.0, 4.1), (25.0, 20.0));
+        let wheel = if wheel { self.accent } else { self.paper };
+        self.filled(wheel, true, || self.round((17.5, 8.0), (5.0, 8.0), 2.5));
+    }
+
+    /// Repeat counts sit bottom right, like every other modifier.
+    unsafe fn badge(&self, text: &str) {
+        self.knockout((36.0, 36.0), 11.0);
+        self.dot((36.0, 36.0), 9.5);
+        let font = CreateFontW(
+            -self.unit(13.0).max(6),
+            0,
+            0,
+            0,
+            700,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            wide("Segoe UI").as_ptr(),
+        );
+        let previous = if font.is_null() {
+            null_mut()
+        } else {
+            SelectObject(self.dc, font)
+        };
+        let start = self.point((26.5, 26.5));
+        let end = self.point((45.5, 45.5));
         label(
             self.dc,
-            number,
+            text,
             RECT {
-                left: self.px(29),
-                top: self.py(28),
-                right: self.px(45),
-                bottom: self.py(44),
+                left: start.x,
+                top: start.y,
+                right: end.x,
+                bottom: end.y,
             },
-            if self.high_contrast { BLACK } else { WHITE },
+            self.paper,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
+        if !font.is_null() {
+            SelectObject(self.dc, previous);
+            DeleteObject(font);
+        }
     }
 
+    unsafe fn drag(&self) {
+        self.knockout((36.0, 36.0), 11.5);
+        self.line((28.0, 36.0), (44.0, 36.0));
+        self.line((36.0, 28.0), (36.0, 44.0));
+        self.polyline(&[(41.0, 33.0), (44.0, 36.0), (41.0, 39.0)]);
+        self.polyline(&[(31.0, 33.0), (28.0, 36.0), (31.0, 39.0)]);
+        self.polyline(&[(33.0, 31.0), (36.0, 28.0), (39.0, 31.0)]);
+        self.polyline(&[(33.0, 41.0), (36.0, 44.0), (39.0, 41.0)]);
+    }
+
+    unsafe fn scroll(&self) {
+        self.line((41.0, 9.0), (41.0, 37.0));
+        self.polyline(&[(37.5, 12.5), (41.0, 9.0), (44.5, 12.5)]);
+        self.polyline(&[(37.5, 33.5), (41.0, 37.0), (44.5, 33.5)]);
+    }
+
+    /// A SketchUp group or component, entered through its red top face.
+    unsafe fn component(&self) {
+        self.filled(self.accent, true, || {
+            self.polygon(&[(10.0, 12.5), (24.0, 20.0), (38.0, 12.5), (24.0, 5.0)])
+        });
+        self.polyline(&[
+            (10.0, 12.5),
+            (10.0, 29.5),
+            (24.0, 37.0),
+            (38.0, 29.5),
+            (38.0, 12.5),
+        ]);
+        self.line((24.0, 20.0), (24.0, 37.0));
+    }
+
+    /// Fills the whole box with the face colour and draws a padlock in ink.
     unsafe fn lock(&self) {
-        self.round(3, 34, 7, 7, 2);
-        self.round(4, 29, 5, 7, 4);
+        self.filled(self.paper, false, || {
+            self.round((0.0, 0.0), (48.0, 48.0), 15.0)
+        });
+        self.filled(self.color, false, || {
+            self.round((10.5, 22.5), (27.0, 19.5), 4.5)
+        });
+        let mut shackle = vec![(16.5, 22.5)];
+        shackle.extend(Self::arc((24.0, 16.5), 7.5, 180.0, 360.0));
+        shackle.push((31.5, 22.5));
+        self.polyline(&shackle);
     }
 
     unsafe fn power(&self, enabled: bool) {
-        self.circle(5, 5, 38, false);
+        self.circle((24.0, 24.0), 19.0);
         if enabled {
-            self.line(19, 15, 19, 33);
-            self.line(29, 15, 29, 33);
+            self.line((20.0, 17.0), (20.0, 31.0));
+            self.line((28.0, 17.0), (28.0, 31.0));
         } else {
-            self.line(19, 14, 34, 24);
-            self.line(34, 24, 19, 34);
-            self.line(19, 34, 19, 14);
+            self.polyline(&[(20.5, 16.5), (32.0, 24.0), (20.5, 31.5), (20.5, 16.5)]);
         }
     }
 
     unsafe fn sliders(&self) {
-        for (x, y) in [(12, 15), (24, 29), (36, 19)] {
-            self.line(x, 7, x, y - 4);
-            self.line(x, y + 4, x, 41);
-            self.circle(x - 4, y - 4, 8, false);
+        for (x, knob) in [(12.0, 16.0), (24.0, 30.0), (36.0, 21.0)] {
+            self.line((x, 7.0), (x, knob - 4.5));
+            self.line((x, knob + 4.5), (x, 41.0));
+            self.circle((x, knob), 4.5);
         }
     }
 
     unsafe fn keyboard(&self) {
-        self.round(4, 10, 40, 29, 5);
-        for row in 0..2 {
+        self.round((4.5, 11.0), (39.0, 27.0), 5.0);
+        for row in [18.5, 24.5] {
             for column in 0..5 {
-                self.line(10 + column * 6, 17 + row * 7, 12 + column * 6, 17 + row * 7);
+                self.dot((12.0 + column as f32 * 6.0, row), 1.8);
             }
         }
-        self.line(15, 32, 33, 32);
+        self.line((16.0, 31.5), (32.0, 31.5));
     }
 
     unsafe fn wand(&self) {
-        self.line(9, 39, 31, 17);
-        self.line(13, 41, 35, 19);
-        self.line(9, 39, 13, 41);
-        self.line(31, 17, 35, 19);
-        self.line(29, 5, 29, 11);
-        self.line(39, 10, 43, 6);
-        self.line(39, 20, 45, 20);
-        self.line(17, 12, 21, 16);
+        self.line((9.0, 39.0), (27.0, 21.0));
+        self.line((34.0, 6.0), (34.0, 20.0));
+        self.line((27.0, 13.0), (41.0, 13.0));
+        self.line((17.0, 7.0), (17.0, 12.0));
+        self.line((14.5, 9.5), (19.5, 9.5));
+        self.line((40.0, 27.0), (40.0, 32.0));
+        self.line((37.5, 29.5), (42.5, 29.5));
     }
 
     unsafe fn bar(&self) {
-        self.round(3, 13, 42, 23, 4);
-        for x in [10, 21, 32] {
-            self.round(x, 19, 6, 10, 2);
-        }
+        self.round((4.0, 14.0), (40.0, 20.0), 6.0);
+        self.filled(self.color, true, || {
+            self.round((10.0, 19.5), (7.0, 9.0), 2.0)
+        });
+        self.round((20.5, 19.5), (7.0, 9.0), 2.0);
+        self.round((31.0, 19.5), (7.0, 9.0), 2.0);
     }
 
     unsafe fn help(&self) {
-        self.circle(5, 5, 38, false);
-        self.line(17, 15, 21, 12);
-        self.line(21, 12, 28, 12);
-        self.line(28, 12, 32, 17);
-        self.line(32, 17, 30, 22);
-        self.line(30, 22, 24, 26);
-        self.line(24, 26, 24, 29);
-        self.circle(22, 34, 4, true);
+        self.circle((24.0, 24.0), 19.0);
+        let mut hook = Self::arc((24.0, 19.0), 5.5, 180.0, 421.8);
+        hook.extend([(25.3, 24.6), (24.4, 25.6), (24.05, 26.6), (24.0, 28.5)]);
+        self.polyline(&hook);
+        self.dot((24.0, 34.5), 1.9);
     }
 
-    unsafe fn robot(&mut self) {
-        self.round(7, 13, 34, 27, 9);
-        self.line(24, 13, 24, 7);
-        self.circle(21, 3, 6, true);
-        self.circle(14, 21, 6, true);
-        self.circle(28, 21, 6, true);
-        self.line(18, 33, 30, 33);
-        self.line(3, 23, 7, 23);
-        self.line(41, 23, 45, 23);
+    unsafe fn robot(&self) {
+        self.round((9.0, 14.0), (30.0, 24.0), 8.0);
+        self.line((24.0, 14.0), (24.0, 9.5));
+        self.line((20.0, 31.5), (28.0, 31.5));
+        self.line((5.0, 22.0), (5.0, 30.0));
+        self.line((43.0, 22.0), (43.0, 30.0));
+        self.dot((24.0, 7.0), 2.5);
+        self.dot((18.5, 25.0), 2.6);
+        self.dot((29.5, 25.0), 2.6);
     }
 }
 

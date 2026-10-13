@@ -164,6 +164,9 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Allow consecutive clicks" => "Consenti clic consecutivi",
         "Fast gesture (fixed second dwell)" => "Gesto rapido (seconda sosta fissa)",
         "Play a sound on click" => "Riproduci un suono al clic",
+        "Black cursor with gray outline during click" => {
+            "Cursore nero con bordo grigio durante il clic"
+        }
         "Show dwell progress by the pointer" => {
             "Mostra avanzamento della sosta vicino al puntatore"
         }
@@ -209,6 +212,9 @@ fn static_italian(text: &str) -> Option<&'static str> {
             "Nascondi la barra finché il puntatore non si avvicina al bordo"
         }
         "Show click bar" => "Mostra barra dei clic",
+        "The click bar stays visible until robocam exits." => {
+            "La barra dei clic resta visibile fino alla chiusura di robocam."
+        }
         "High-contrast bar (black background)" => "Barra ad alto contrasto (sfondo nero)",
         "Normal: select once for the next click; again to lock." => {
             "Normale: seleziona per il prossimo clic; riseleziona per fissare."

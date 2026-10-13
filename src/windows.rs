@@ -2,8 +2,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod camera_options;
+mod click_feedback;
+mod desktop_test;
 mod drawing;
 mod messages;
+mod pointer;
 mod runtime;
 mod sketchup;
 mod startup;
@@ -29,10 +32,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
-    System::{
-        Diagnostics::Debug::MessageBeep, LibraryLoader::*, SystemInformation::*, Threading::*,
-    },
+    Graphics::{Dwm::*, Gdi::*},
+    System::{LibraryLoader::*, SystemInformation::*, Threading::*},
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
@@ -72,6 +73,7 @@ thread_local! {
     static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
     static MAIN_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
     static APPBAR_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
+    static BAR_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
     static APPBAR_POSITIONING: Cell<bool> = const { Cell::new(false) };
     static APPBAR_PENDING: Cell<bool> = const { Cell::new(false) };
     static APPBAR_RECT: Cell<Option<(u32,[i32;4])>> = const { Cell::new(None) };
@@ -109,12 +111,12 @@ const BAR_BUTTONS: [(u16, &str); 10] = [
     (210, "Enable / pause"),
     (202, "Left click"),
     (205, "Double click"),
+    (211, "SketchUp: edit group/component"),
     (206, "Triple click"),
+    (204, "Right click"),
     (207, "Drag"),
     (203, "Middle click"),
     (208, "Scroll"),
-    (211, "SketchUp: edit group/component"),
-    (204, "Right click"),
     (209, "Show main window"),
 ];
 
@@ -192,6 +194,9 @@ struct App {
     wizard: HWND,
     font: HFONT,
     icon: HICON,
+    /// Per-DPI frames of the embedded icon, owned by the app: big, small, tray.
+    window_icons: [HICON; 2],
+    tray_icon: HICON,
     mouse_hook: HHOOK,
     config: Settings,
     motion: MotionEngine,
@@ -220,6 +225,7 @@ struct App {
     calibration_min: (f32, f32),
     calibration_max: (f32, f32),
     injected: [bool; 3],
+    click_cursor: click_feedback::ClickCursor,
     dry_run: bool,
     smoke_started: Instant,
     was_controlling: bool,
@@ -229,12 +235,14 @@ struct App {
     available_release: Option<(String, String)>,
     tooltip_text: Vec<Vec<u16>>,
     auto_close: bool,
+    desktop_test_stage: Option<(u8, u128)>,
     camera_fitted: bool,
     window_dpi: Vec<(HWND, u32)>,
     dpi_fonts: Vec<(u32, HFONT)>,
     logical_children: Vec<(HWND, HWND, [i32; 4])>,
     bar_size: [i32; 2],
     bar_visual_state: Option<BarVisualState>,
+    last_foreground: HWND,
     diagnostic_path: Option<std::path::PathBuf>,
     diagnostic_written_ms: u64,
     frames_received: u64,
@@ -279,7 +287,8 @@ pub fn run() {
         if args.iter().any(|s| s == "--version") {
             return;
         }
-        let auto_close = args.iter().any(|s| s == "--smoke-test");
+        let desktop_test = args.iter().any(|s| s == "--desktop-test");
+        let auto_close = desktop_test || args.iter().any(|s| s == "--smoke-test");
         let dry_run = auto_close || args.iter().any(|s| s == "--ui-test");
         if let Some(mode) = argument("--configure-startup") {
             if !matches!(mode.as_str(), "enable" | "disable") {
@@ -378,6 +387,8 @@ pub fn run() {
             wizard: null_mut(),
             font,
             icon,
+            window_icons: [null_mut(); 2],
+            tray_icon: load_icon(GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem())),
             mouse_hook: null_mut(),
             config,
             motion: MotionEngine::default(),
@@ -410,17 +421,20 @@ pub fn run() {
             smoke_started: Instant::now(),
             was_controlling: false,
             pending_input: VecDeque::new(),
+            click_cursor: click_feedback::ClickCursor::default(),
             update_receiver: None,
             manual_update: false,
             available_release: None,
             tooltip_text: Vec::new(),
             auto_close,
+            desktop_test_stage: desktop_test.then_some((0, 0)),
             camera_fitted: false,
             window_dpi: Vec::new(),
             dpi_fonts: vec![(96, font)],
             logical_children: Vec::new(),
             bar_size: [561, 52],
             bar_visual_state: None,
+            last_foreground: null_mut(),
             diagnostic_path: argument("--diagnostic-report").map(std::path::PathBuf::from),
             diagnostic_written_ms: 0,
             frames_received: 0,
@@ -454,6 +468,7 @@ pub fn run() {
         MAIN_WINDOW.with(|window| window.set(hwnd));
         let setup_guard = CallbackGuard::enter().unwrap();
         app.prepare_window(hwnd, 300, 300);
+        app.update_window_icons(app.dpi_for(hwnd));
         app.create_main();
         app.create_bar();
         app.register_hotkeys();
@@ -535,6 +550,11 @@ pub fn run() {
         for (_, font) in app.dpi_fonts.drain(..) {
             DeleteObject(font);
         }
+        for icon in app.window_icons.into_iter().chain([app.tray_icon]) {
+            if !icon.is_null() {
+                DestroyIcon(icon);
+            }
+        }
         CloseHandle(single);
         if dry_run
             && let Some(arg) = args.iter().position(|s| s == "--smoke-report")
@@ -542,7 +562,11 @@ pub fn run() {
         {
             let _ = std::fs::write(
                 path,
-                "robocam: native windows, options, click bar, timer, clean shutdown OK\n",
+                if desktop_test {
+                    "robocam: Show Desktop, toolbar hit testing and work area, minimize to tray, restore, clean shutdown OK\n"
+                } else {
+                    "robocam: native windows, options, click bar, timer, clean shutdown OK\n"
+                },
             );
         }
     }
@@ -573,6 +597,27 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     if msg == WM_NCCREATE {
         let create = &*(lp as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+    }
+    // These notifications can arrive synchronously during Shell operations.
+    if MAIN_WINDOW.with(|main| main.get() == hwnd)
+        && ((msg == WM_SYSCOMMAND && wp & 0xfff0 == SC_MINIMIZE as usize)
+            || (msg == WM_SIZE && wp == SIZE_MINIMIZED as usize))
+    {
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    }
+    if BAR_WINDOW.with(|bar| bar.get() == hwnd) {
+        if msg == WM_SYSCOMMAND && wp & 0xfff0 == SC_MINIMIZE as usize {
+            return 0;
+        }
+        if msg == WM_WINDOWPOSCHANGING {
+            let position = &mut *(lp as *mut WINDOWPOS);
+            position.flags &= !SWP_HIDEWINDOW;
+            position.flags |= SWP_NOACTIVATE;
+            if position.flags & SWP_NOZORDER == 0 {
+                position.hwndInsertAfter = HWND_TOPMOST;
+            }
+        }
     }
     // Native parent painting synchronously sends WM_DRAWITEM for owner-drawn
     // children. Do not hold an App borrow/guard while DefWindowProc performs
@@ -638,6 +683,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             | WM_LBUTTONDOWN
             | WM_LBUTTONUP
             | WM_NCHITTEST
+            | WM_MOUSEACTIVATE
             | WM_CLOSE
             | WM_QUERYENDSESSION
             | WM_ENDSESSION
@@ -695,7 +741,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         APPBAR_CALLBACK if hwnd == app.bar => {
             match wp as u32 {
-                ABN_FULLSCREENAPP | ABN_WINDOWARRANGE if app.config.profile().show_bar => {
+                ABN_FULLSCREENAPP | ABN_WINDOWARRANGE => {
                     SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
@@ -788,6 +834,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             ReleaseCapture();
             0
         }
+        WM_MOUSEACTIVATE if hwnd == app.bar => MA_NOACTIVATE as isize,
         WM_NCHITTEST if hwnd == app.bar && app.config.profile().bar_position == 4 => {
             let hit = DefWindowProcW(hwnd, msg, wp, lp);
             if hit == HTCLIENT as isize {
@@ -808,10 +855,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 app.destroy_owned(hwnd);
                 app.wizard = null_mut();
             } else if hwnd == app.bar {
-                app.config.profile_mut().show_bar = false;
-                remove_appbar(hwnd);
-                ShowWindow(hwnd, SW_HIDE);
-                app.save();
+                app.keep_bar_visible();
             }
             0
         }
@@ -872,6 +916,21 @@ unsafe fn set_text(hwnd: HWND, value: &str) {
 unsafe fn set_text_raw(hwnd: HWND, value: &str) {
     SetWindowTextW(hwnd, wide_raw(value).as_ptr());
 }
+/// Loads the embedded icon's frame for `size` pixels; the caller destroys it.
+unsafe fn load_icon(size: i32) -> HICON {
+    // MAKEINTRESOURCEW(1): this value is a resource identifier, not memory.
+    #[allow(clippy::manual_dangling_ptr)]
+    let resource = 1usize as *const u16;
+    LoadImageW(
+        GetModuleHandleW(null()),
+        resource,
+        IMAGE_ICON,
+        size,
+        size,
+        LR_DEFAULTCOLOR,
+    ) as HICON
+}
+
 fn scale(value: i32, dpi: u32) -> i32 {
     ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32
 }
@@ -927,6 +986,11 @@ impl App {
             self.bar = null_mut();
             self.destroy_owned(bar);
         }
+        BAR_WINDOW.with(|bar| {
+            if bar.get() == hwnd {
+                bar.set(null_mut());
+            }
+        });
         remove_appbar(if hwnd == self.hwnd { self.bar } else { hwnd });
         self.window_dpi.retain(|(window, _)| *window != hwnd);
         self.logical_children
@@ -1032,6 +1096,24 @@ impl App {
         );
     }
 
+    /// Title bar, taskbar and Alt+Tab use the icon frame drawn for this DPI.
+    unsafe fn update_window_icons(&mut self, dpi: u32) {
+        for (index, (kind, metric)) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)]
+            .into_iter()
+            .enumerate()
+        {
+            let icon = load_icon(GetSystemMetricsForDpi(metric, dpi));
+            if icon.is_null() {
+                continue;
+            }
+            SendMessageW(self.hwnd, WM_SETICON, kind as usize, icon as isize);
+            let previous = std::mem::replace(&mut self.window_icons[index], icon);
+            if !previous.is_null() {
+                DestroyIcon(previous);
+            }
+        }
+    }
+
     unsafe fn change_dpi(&mut self, hwnd: HWND, dpi: u32, suggested: &RECT) {
         let dpi = dpi.max(96);
         self.remember_dpi(hwnd, dpi);
@@ -1062,6 +1144,7 @@ impl App {
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
         if hwnd == self.hwnd {
+            self.update_window_icons(dpi);
             self.layout_main();
         }
         if hwnd == self.bar && self.config.profile().bar_position != 4 {
@@ -1252,6 +1335,14 @@ impl App {
             GetModuleHandleW(null()),
             self as *mut Self as *const c_void,
         );
+        BAR_WINDOW.with(|bar| bar.set(self.bar));
+        let exclude_from_peek: i32 = 1;
+        DwmSetWindowAttribute(
+            self.bar,
+            DWMWA_EXCLUDED_FROM_PEEK as u32,
+            (&exclude_from_peek as *const i32).cast(),
+            size_of::<i32>() as u32,
+        );
         self.prepare_window(self.bar, 561, 52);
         let thin = self.config.profile().thin_bar;
         let vertical = matches!(self.config.profile().bar_position, 2 | 3);
@@ -1300,14 +1391,7 @@ impl App {
         };
         self.bar_size = [w, h];
         self.position_bar();
-        ShowWindow(
-            self.bar,
-            if self.config.profile().show_bar {
-                SW_SHOWNOACTIVATE
-            } else {
-                SW_HIDE
-            },
-        );
+        ShowWindow(self.bar, SW_SHOWNOACTIVATE);
         self.refresh_bar_visuals();
     }
 
@@ -1342,11 +1426,6 @@ impl App {
 
     unsafe fn position_bar(&mut self) {
         if self.bar.is_null() || IsWindow(self.bar) == 0 {
-            return;
-        }
-        if !self.config.profile().show_bar {
-            remove_appbar(self.bar);
-            ShowWindow(self.bar, SW_HIDE);
             return;
         }
         let _positioning = AppbarPositionGuard::enter();
@@ -1473,15 +1552,46 @@ impl App {
         self.status = "Opening camera…".into();
     }
 
+    unsafe fn keep_bar_visible(&self) {
+        if !self.bar.is_null() && IsWindow(self.bar) != 0 {
+            if IsIconic(self.bar) != 0 {
+                ShowWindow(self.bar, SW_SHOWNOACTIVATE);
+            }
+            SetWindowPos(
+                self.bar,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+
     unsafe fn tick(&mut self) {
         let time = now();
-        if (self.auto_close && self.smoke_started.elapsed().as_secs_f32() > 2.0)
+        if (self.auto_close
+            && self.smoke_started.elapsed().as_secs_f32() > 2.0
+            && self.desktop_test_stage.is_none_or(|(stage, _)| stage == 2))
             || self
                 .exit_after_ms
                 .is_some_and(|limit| self.smoke_started.elapsed().as_millis() >= u128::from(limit))
         {
             self.destroy_owned(self.hwnd);
             return;
+        }
+        // Show Desktop can raise the desktop without changing our visibility bit.
+        let foreground = GetForegroundWindow();
+        if foreground != self.last_foreground
+            || IsWindowVisible(self.bar) == 0
+            || IsIconic(self.bar) != 0
+        {
+            self.last_foreground = foreground;
+            self.keep_bar_visible();
+        }
+        if self.desktop_test_stage.is_some() {
+            self.verify_desktop_transition();
         }
         self.poll_updates();
         self.poll_camera_discovery();
@@ -1564,66 +1674,14 @@ impl App {
                 let movement =
                     self.motion
                         .process(dx, dy, position, screen(), &self.config.profile().motion);
-                if !self.click.scrolling() && self.pending_input.is_empty() {
+                let requested = if !self.click.scrolling() && self.pending_input.is_empty() {
                     self.move_cursor(movement.position);
-                    position = movement.position;
-                }
-                let main_play = !self.enabled
-                    && WindowFromPoint(POINT {
-                        x: position.0,
-                        y: position.1,
-                    }) == GetDlgItem(self.hwnd, ENABLE as i32);
-                let over_bar = self.inside_window(self.bar, position) || main_play;
-                let bar_control = if main_play {
-                    ENABLE
+                    position = cursor();
+                    Some(movement.position)
                 } else {
-                    self.bar_control_at(position)
+                    None
                 };
-                if bar_control != self.hover_id
-                    || movement.delta.0.abs().max(movement.delta.1.abs())
-                        > self.config.profile().click.tolerance_px as i32
-                {
-                    self.hover_id = bar_control;
-                    self.hover_since = time;
-                    self.hover_done = false;
-                }
-                if over_bar {
-                    self.click.suspend_dwell();
-                    if self.enabled
-                        && self.config.profile().fast_bar
-                        && let Some((_, _, action)) =
-                            BAR_ACTIONS.iter().find(|(id, _, _)| *id == bar_control)
-                    {
-                        self.click.hover(*action, true);
-                    }
-                    if bar_control != 0
-                        && (self.enabled || matches!(bar_control, 210 | ENABLE))
-                        && !self.hover_done
-                        && time.saturating_sub(self.hover_since)
-                            >= self.config.profile().click.dwell_ms
-                    {
-                        self.hover_done = true;
-                        self.command(if main_play { self.hwnd } else { self.bar }, bar_control, 0);
-                    }
-                } else if self.enabled && self.pending_input.is_empty() {
-                    let delta = if self.click.scrolling() {
-                        movement.unclamped_delta
-                    } else {
-                        movement.delta
-                    };
-                    let events = self.click.update(
-                        time,
-                        delta,
-                        position,
-                        true,
-                        true,
-                        false,
-                        &self.config.profile().click,
-                    );
-                    self.dispatch(events);
-                } else if !self.enabled {
-                    self.click.suspend_dwell();
-                }
+                self.pointer_actions(time, movement, position, requested);
             } else {
                 self.motion.reset();
                 self.hover_since = time;
@@ -1670,15 +1728,20 @@ impl App {
                     let time = now();
                     self.pending_input
                         .extend(click_sequence(time, button, count, press, spacing));
+                    self.update_click_cursor();
+                    self.play_click_sound(false);
                     // A zero-delay click should reach Windows in this frame,
                     // without waiting for another WM_TIMER delivery.
                     self.flush_pending_input(now());
-                    if self.config.profile().click_sound {
-                        MessageBeep(0xFFFF_FFFF);
-                    }
                 }
-                InputEvent::ButtonDown(button) => self.button(button, true),
-                InputEvent::ButtonUp(button) => self.button(button, false),
+                InputEvent::ButtonDown(button) => {
+                    self.button(button, true);
+                    self.play_click_sound(true);
+                }
+                InputEvent::ButtonUp(button) => {
+                    self.button(button, false);
+                    self.play_click_sound(false);
+                }
                 InputEvent::Scroll(x, y) => {
                     if y != 0 {
                         self.inject(MOUSEEVENTF_WHEEL, 0, 0, y as u32);
@@ -1753,12 +1816,12 @@ impl App {
         if current == position {
             return;
         }
-        let x = ((position.0 - s.left) as i64 * 65535 / (s.width - 1).max(1) as i64).clamp(0, 65535)
-            as i32;
-        let y = ((position.1 - s.top) as i64 * 65535 / (s.height - 1).max(1) as i64).clamp(0, 65535)
-            as i32;
+        let (x, y) = pointer::absolute_position(position, s);
         self.inject(
-            MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_ABSOLUTE
+                | MOUSEEVENTF_VIRTUALDESK
+                | MOUSEEVENTF_MOVE
+                | MOUSEEVENTF_MOVE_NOCOALESCE,
             x,
             y,
             0,
@@ -1780,6 +1843,8 @@ impl App {
         let rectangle = |rect: RECT| [rect.left, rect.top, rect.right, rect.bottom];
         let frame = self.frame.as_ref();
         let report = serde_json::json!({
+            "version":env!("CARGO_PKG_VERSION"),
+            "bar_button_ids":BAR_BUTTONS.map(|(id,_)|id),
             "process_id":GetCurrentProcessId(), "running":running,
             "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
             "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
@@ -1797,6 +1862,7 @@ impl App {
             "last_dwell_duration_ms":self.click.last_dwell_duration_ms(),
             "last_click_dispatch_delay_ms":self.last_click_dispatch_delay_ms,
             "click_actions":self.click_actions,
+            "click_cursor_active":self.click_cursor.active(),
             "physical_mouse_pause_ms":self.config.profile().pause_on_mouse_ms,
             "calibration_ready":self.tracking_ready(),
             "bar_bounds":rectangle(bar), "monitor_bounds":rectangle(monitor.rcMonitor),
@@ -1826,6 +1892,7 @@ impl App {
         };
         self.inject(flag, 0, 0, 0);
         self.injected[index] = down;
+        self.update_click_cursor();
     }
 
     unsafe fn release_all(&mut self) {
@@ -1842,6 +1909,7 @@ impl App {
                 self.button(b, false);
             }
         }
+        self.update_click_cursor();
     }
 
     unsafe fn toggle(&mut self) {
@@ -1894,7 +1962,11 @@ impl App {
         icon.uID = 1;
         icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         icon.uCallbackMessage = TRAY_MESSAGE;
-        icon.hIcon = self.icon;
+        icon.hIcon = if self.tray_icon.is_null() {
+            self.icon
+        } else {
+            self.tray_icon
+        };
         let tip = wide("robocam — F11 enable / pause");
         icon.szTip[..tip.len()].copy_from_slice(&tip);
         Shell_NotifyIconW(operation, &icon);
@@ -1927,8 +1999,13 @@ impl App {
             return 0;
         }
         let mut point = POINT { x: p.0, y: p.1 };
+        // A popup or another window can cover the bar. Do not activate a
+        // button merely because its rectangle is underneath the pointer.
+        if GetAncestor(WindowFromPoint(point), GA_ROOT) != self.bar {
+            return 0;
+        }
         ScreenToClient(self.bar, &mut point);
-        let child = ChildWindowFromPoint(self.bar, point);
+        let child = ChildWindowFromPointEx(self.bar, point, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
         if child == self.bar {
             0
         } else {
@@ -1944,6 +2021,11 @@ impl App {
     unsafe fn verify_bar_lifecycle(&mut self) {
         assert!(GetWindow(self.bar, GW_OWNER).is_null());
         ShowWindow(self.hwnd, SW_MINIMIZE);
+        assert_eq!(
+            IsWindowVisible(self.hwnd),
+            0,
+            "minimize must hide the taskbar window"
+        );
         assert_ne!(IsWindowVisible(self.bar), 0, "bar hidden by minimize");
         ShowWindow(self.hwnd, SW_HIDE);
         assert_ne!(IsWindowVisible(self.bar), 0, "bar hidden with preview");
@@ -1975,6 +2057,65 @@ impl App {
         self.release_all();
         assert!(!self.injected.iter().any(|down| *down));
         assert!(self.pending_input.is_empty());
+
+        self.verify_click_feedback();
+        self.verify_bar_pointer_geometry();
+        ShowWindow(self.bar, SW_HIDE);
+        self.keep_bar_visible();
+        assert_ne!(
+            IsWindowVisible(self.bar),
+            0,
+            "bar stayed hidden after desktop arrangement"
+        );
+        SetWindowPos(
+            self.bar,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        assert_ne!(
+            GetWindowLongW(self.bar, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST,
+            0
+        );
+    }
+
+    unsafe fn verify_click_feedback(&mut self) {
+        let previous = self.config.profile().black_cursor_on_click;
+        self.config.profile_mut().black_cursor_on_click = true;
+        // Keep feedback across multi-click gaps; dry-run never hides the cursor.
+        for count in 1..=3 {
+            self.pending_input
+                .extend(click_sequence(now(), MouseButton::Left, count, 100, 25));
+            while let Some((_, button, down)) = self.pending_input.pop_front() {
+                self.button(button, down);
+                assert_eq!(
+                    self.click_cursor.active(),
+                    down || !self.pending_input.is_empty()
+                );
+            }
+            assert!(!self.click_cursor.active());
+        }
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            self.dispatch(vec![InputEvent::ButtonDown(button)]);
+            assert!(self.click_cursor.active());
+            self.release_all();
+            assert!(!self.click_cursor.active());
+        }
+        // Cancellation before a delayed SketchUp press restores feedback too.
+        self.pending_input
+            .extend(click_sequence(now() + 40, MouseButton::Left, 2, 100, 25));
+        self.update_click_cursor();
+        assert!(self.click_cursor.active());
+        self.release_all();
+        assert!(!self.click_cursor.active());
+        self.config.profile_mut().black_cursor_on_click = false;
+        self.button(MouseButton::Left, true);
+        assert!(!self.click_cursor.active());
+        self.release_all();
+        self.config.profile_mut().black_cursor_on_click = previous;
     }
 }
 
@@ -2037,9 +2178,7 @@ impl App {
             }
             WIZARD => self.open_wizard(),
             BAR => {
-                self.config.profile_mut().show_bar = !self.config.profile().show_bar;
-                self.create_bar();
-                self.save();
+                self.keep_bar_visible();
             }
             HELP => message(
                 self.hwnd,
@@ -2226,7 +2365,7 @@ impl App {
             GetModuleHandleW(null()),
             self as *mut Self as *const c_void,
         );
-        self.prepare_window(self.options, 550, 535);
+        self.prepare_window(self.options, 550, 562);
         self.controls.clear();
         let profile = self.child(
             self.options,
@@ -2343,16 +2482,23 @@ impl App {
             p.click.fast_gesture,
         );
         self.check(1, 5, 425, "Play a sound on click", p.click_sound);
-        self.edit(
+        self.check(
             1,
             6,
+            426,
+            "Black cursor with gray outline during click",
+            p.black_cursor_on_click,
+        );
+        self.edit(
+            1,
+            7,
             427,
             "Pause after physical mouse (ms)",
             p.pause_on_mouse_ms,
         );
         self.edit(
             1,
-            7,
+            8,
             428,
             "Mouse press duration (0-1000 ms)",
             p.click.press_ms.unwrap_or(p.event_delay_ms),
@@ -2371,9 +2517,9 @@ impl App {
                 .iter()
                 .position(|a| *a == p.click.gestures[i])
                 .unwrap_or(0);
-            self.choice(1, 8 + i, 429 + i as u16, label, &actions, selected);
+            self.choice(1, 9 + i, 429 + i as u16, label, &actions, selected);
         }
-        self.note(1, 12, "Gesture: dwell, move in a direction, dwell again.");
+        self.note(1, 13, "Gesture: dwell, move in a direction, dwell again.");
 
         self.camera_choices.clear();
         let label = self.child(self.options, "STATIC", "Camera", 0, 0, [20, 94, 125, 23]);
@@ -2470,7 +2616,7 @@ impl App {
             &["Top", "Bottom", "Left", "Right", "Floating"],
             p.bar_position as usize,
         );
-        self.check(3, 4, 454, "Show click bar", p.show_bar);
+        self.note(3, 4, "The click bar stays visible until robocam exits.");
         self.check(
             3,
             5,
@@ -2586,7 +2732,7 @@ impl App {
             "Save",
             SAVE,
             WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-            [308, 462, 98, 28],
+            [308, 489, 98, 28],
         );
         self.child(
             self.options,
@@ -2594,7 +2740,7 @@ impl App {
             "Cancel",
             CANCEL,
             WS_TABSTOP,
-            [414, 462, 98, 28],
+            [414, 489, 98, 28],
         );
         self.show_options_page();
         ShowWindow(self.options, SW_SHOW);
@@ -2749,6 +2895,7 @@ impl App {
             p.click.consecutive = self.checked(423);
             p.click.fast_gesture = self.checked(424);
             p.click_sound = self.checked(425);
+            p.black_cursor_on_click = self.checked(426);
             p.pause_on_mouse_ms = self.number(427, 0, 10000)?;
             p.click.press_ms = Some(self.number(428, 0, 1000)?);
             for i in 0..4 {
@@ -2768,7 +2915,7 @@ impl App {
             p.fast_bar = self.selected(450) == 1;
             p.thin_bar = self.selected(451) == 1;
             p.bar_position = self.selected(452) as u8;
-            p.show_bar = self.checked(454);
+            p.show_bar = true;
             p.high_contrast_bar = self.checked(466);
             p.keyboard_command = text(GetDlgItem(self.options, 455));
             p.enabled_at_startup = Some(self.checked(459));
