@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 - 2026-10-13
+
+- Added saved, fixed webcam zoom through the native Windows camera driver. The
+  driver range and step are displayed in Camera settings. Zoom is read at camera
+  startup/reconnect and only written if different; the result is read back and
+  verified. Unsupported drivers report an error; no software zoom is substituted.
+- Set the Robo default to 282 native increments: value 382 on the Anker PowerConf
+  C200 (range 100–400, step 1). Other existing profiles keep driver zoom unchanged
+  until enabled; explicit saved preferences are preserved.
+- Appended a separate pause/resume control for both head movement and clicks.
+  It releases held input, discards pending clicks and keeps camera preview active.
+  Resume using a physical click or the configurable full-pause hotkey (default F8).
+- Replaced the old triple-click toolbar button in place with SketchUp triple click:
+  the same cube icon as SketchUp double click, with a 3 badge, and exactly the same
+  paced timing. Both activate Select with Space and cancel on focus changes.
+- Added native UI screenshots and feature explanations to README, plus repeatable
+  screenshot capture and camera-driver diagnostics for hardware verification.
+
 ## 0.4.2 - 2026-10-13
 
 - Kept the click bar visible and topmost through Show Desktop, desktop Peek,

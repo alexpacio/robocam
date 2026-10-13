@@ -63,11 +63,22 @@ means that no public release has been published yet.
 For remote diagnostics, `--paused --diagnostic-report <path> --exit-after-ms 15000`
 runs the real camera and interface for 15 seconds with desktop clicks paused;
 head-driven pointer movement remains active.
+Use `--fully-paused` instead to block both movement and clicks while testing the
+live camera. Reports include native zoom range, current value and whether a
+driver write was actually performed.
 The JSON report records frame rate, tracking validity, input delivery and AppBar
 geometry; it contains no camera images. Omit the time limit for an ongoing session.
 `--export-default-settings <path>` writes the built-in profile configuration
 without opening the camera or interface.
 `--list-cameras <path>` writes device names, stable identities and backend indices.
+`--camera-name "Anker PowerConf C200" --camera-zoom-report <path>` reads native
+driver zoom without starting capture. Adding `--camera-zoom-increments <count>`
+conditionally sets it; unsupported/out-of-range values fail explicitly.
+`--capture-ui <directory>` exports BMP screenshots of robocam's native windows,
+without camera capture, input injection or settings writes. Convert these losslessly
+to PNG for README; it never captures the surrounding desktop or webcam frames.
+`--request-exit` asks the existing instance in the same interactive session to
+release held input and shut down cleanly.
 `--configure-startup enable|disable` manages elevated login startup.
 Normal operation requests elevation and maintains Realtime priority; diagnostic
 reports include the actual elevation state and Windows priority class.

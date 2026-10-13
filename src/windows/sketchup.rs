@@ -1,7 +1,23 @@
 use super::*;
 
+fn sequence(
+    start: u64,
+    count: u8,
+    press: Option<u64>,
+    double_click_ms: u32,
+) -> impl Iterator<Item = (u64, MouseButton, bool)> {
+    let gap = u64::from((double_click_ms / 2).clamp(20, 60));
+    click_sequence(
+        start,
+        MouseButton::Left,
+        count,
+        press.unwrap_or(10),
+        gap.saturating_sub(10),
+    )
+}
+
 impl App {
-    pub(super) unsafe fn sketchup_edit(&mut self) {
+    pub(super) unsafe fn sketchup_click(&mut self, count: u8) {
         let position = cursor();
         let target = GetAncestor(
             WindowFromPoint(POINT {
@@ -28,7 +44,7 @@ impl App {
         if !is_sketchup {
             message(
                 self.hwnd,
-                "Use the SketchUp button over a group or component in the SketchUp model view.",
+                "Use a SketchUp action over geometry in the SketchUp model view.",
             );
             return;
         }
@@ -66,16 +82,29 @@ impl App {
         self.click_actions += 1;
         self.pending_target = Some(target);
         let start = now() + 40;
-        let gap = u64::from((GetDoubleClickTime() / 2).clamp(20, 60));
-        let press = self.config.profile().click.press_ms.unwrap_or(10);
-        self.pending_input.extend(click_sequence(
+        self.pending_input.extend(sequence(
             start,
-            MouseButton::Left,
-            2,
-            press,
-            gap.saturating_sub(10),
+            count,
+            self.config.profile().click.press_ms,
+            GetDoubleClickTime(),
         ));
         self.update_click_cursor();
         self.play_click_sound(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn triple_extends_the_same_paced_double_sequence() {
+        for press in [None, Some(0), Some(120)] {
+            let double: Vec<_> = sequence(40, 2, press, 500).collect();
+            let triple: Vec<_> = sequence(40, 3, press, 500).collect();
+            assert_eq!(double, triple[..4]);
+            assert_eq!(triple.len(), 6);
+            assert_eq!(triple[4].0 - triple[3].0, 50);
+            assert_eq!(triple[5].0 - triple[4].0, press.unwrap_or(10));
+        }
     }
 }

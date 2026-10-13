@@ -192,11 +192,12 @@ impl App {
             .iter()
             .find(|(control, _, _)| *control == id)
             .map(|(_, _, action)| *action);
-        let power = matches!(id, ENABLE | 210);
+        let power = matches!(id, ENABLE | 210 | 212);
         // Pause is the state that matters most, so it is the active one.
-        let paused = !self.enabled;
+        let paused = !self.enabled || self.full_paused;
         let active = match id {
             ENABLE | 210 | 201 => paused,
+            212 => self.full_paused,
             BAR => true,
             207 => self.click.drag_enabled(),
             208 => self.click.scrolling() || self.click.selected() == ClickAction::Scroll,
@@ -390,6 +391,10 @@ impl App {
             BAR => icon.bar(),
             HELP => icon.help(),
             209 => icon.robot(),
+            212 => {
+                icon.power(!self.full_paused);
+                icon.badge("M");
+            }
             201 => {
                 icon.mouse(None, false);
                 icon.line((7.0, 41.0), (41.0, 7.0));
@@ -403,7 +408,7 @@ impl App {
                 icon.badge("2");
             }
             206 => {
-                icon.mouse(Some(MouseButton::Left), false);
+                icon.component();
                 icon.badge("3");
             }
             207 => {

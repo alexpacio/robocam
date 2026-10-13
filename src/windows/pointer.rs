@@ -45,6 +45,8 @@ impl App {
         let saved_profile = self.config.profile().clone();
         let saved_click = std::mem::take(&mut self.click);
         let saved_enabled = self.enabled;
+        let saved_full_paused = self.full_paused;
+        self.full_paused = false;
         self.config.profile_mut().fast_bar = false;
         self.config.profile_mut().click.mode = ClickMode::Dwell;
         let actions = self.click_actions;
@@ -63,7 +65,10 @@ impl App {
             self.pointer_actions(time, MotionOutput::default(), centre, Some(centre));
             time += self.config.profile().click.dwell_ms;
             self.pointer_actions(time, MotionOutput::default(), centre, Some(centre));
-            assert!(self.hover_done, "toolbar dwell did not activate {id}");
+            assert!(
+                self.hover_done || (id == 212 && self.full_paused),
+                "toolbar dwell did not activate {id}"
+            );
             assert_eq!(
                 self.click_actions, actions,
                 "toolbar dwell generated a desktop click"
@@ -76,6 +81,7 @@ impl App {
         // reports a point in the browser's tab strip underneath it. Neither
         // location may trigger an action until movement is confirmed.
         let requested = (bar.left + 10, bar.top + 10);
+        self.full_paused = false;
         let actual = (bar.left + 10, bar.bottom + 10);
         self.enabled = true;
         for _ in 0..3 {
@@ -96,6 +102,7 @@ impl App {
         assert_eq!(self.input_sent.get(), input_sent);
         self.click = saved_click;
         self.enabled = saved_enabled;
+        self.full_paused = saved_full_paused;
         *self.config.profile_mut() = saved_profile;
         self.hover_id = 0;
         self.hover_done = false;
@@ -111,6 +118,10 @@ impl App {
         position: (i32, i32),
         requested: Option<(i32, i32)>,
     ) {
+        if self.full_paused {
+            self.click.suspend_dwell();
+            return;
+        }
         if requested.is_some_and(|target| target != position) {
             self.click.suspend_dwell();
             self.hover_id = 0;
@@ -148,7 +159,7 @@ impl App {
                 self.click.hover(*action, true);
             }
             if bar_control != 0
-                && (self.enabled || matches!(bar_control, 210 | ENABLE))
+                && (self.enabled || matches!(bar_control, 210 | ENABLE | 212))
                 && !self.hover_done
                 && time.saturating_sub(self.hover_since) >= self.config.profile().click.dwell_ms
             {

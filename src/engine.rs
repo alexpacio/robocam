@@ -199,10 +199,11 @@ pub enum ClickAction {
     Scroll,
     NoClick,
     SketchUpEdit,
+    SketchUpConnected,
 }
 
 impl ClickAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::NoClick,
         Self::Left,
         Self::Double,
@@ -212,6 +213,7 @@ impl ClickAction {
         Self::Drag,
         Self::Scroll,
         Self::SketchUpEdit,
+        Self::SketchUpConnected,
     ];
 
     pub fn label(self) -> &'static str {
@@ -225,6 +227,7 @@ impl ClickAction {
             Self::Scroll => "Scroll",
             Self::NoClick => "No click",
             Self::SketchUpEdit => "SketchUp: edit group/component",
+            Self::SketchUpConnected => "SketchUp: select connected (triple click)",
         }
     }
 
@@ -249,6 +252,8 @@ pub enum MouseButton {
 pub enum InputEvent {
     /// Select tool (Space) followed by a paced double click at the same point.
     SketchUpEdit,
+    /// Select tool followed by three clicks using SketchUp's paced timing.
+    SketchUpConnected,
     MoveTo(i32, i32),
     /// Count is 1, 2 or 3. The platform layer spaces multi-clicks appropriately.
     Click(MouseButton, u8),
@@ -662,6 +667,7 @@ impl ClickEngine {
                 return;
             }
             ClickAction::SketchUpEdit => events.push(InputEvent::SketchUpEdit),
+            ClickAction::SketchUpConnected => events.push(InputEvent::SketchUpConnected),
             ClickAction::Drag | ClickAction::NoClick => return,
         }
         self.selected = self.locked;
@@ -805,6 +811,21 @@ mod tests {
             vec![InputEvent::SketchUpEdit]
         );
         assert_eq!(engine.selected(), ClickAction::Left);
+    }
+
+    #[test]
+    fn sketchup_connected_selection_is_one_shot_and_can_be_locked() {
+        let mut engine = ClickEngine::default();
+        engine.select(ClickAction::SketchUpConnected, false);
+        assert!(tick(&mut engine, 0, (0, 0)).is_empty());
+        assert_eq!(
+            tick(&mut engine, 1000, (0, 0)),
+            vec![InputEvent::SketchUpConnected]
+        );
+        assert_eq!(engine.selected(), ClickAction::Left);
+        engine.select(ClickAction::SketchUpConnected, false);
+        engine.select(ClickAction::SketchUpConnected, false);
+        assert_eq!(engine.locked(), ClickAction::SketchUpConnected);
     }
 
     #[test]

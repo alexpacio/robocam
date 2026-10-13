@@ -13,21 +13,37 @@ substituting another device. With no saved choice, a single camera opens automat
 multiple cameras require a selection. Refresh discovers connected devices. Forget
 saved camera selects automatic mode; Save applies the reset.
 
+Fixed zoom uses the selected camera's `IAMCameraControl` native Zoom property.
+The saved value is a count of driver increments above its reported minimum. On
+startup/reconnect, after opening/configuring capture, robocam reads the current
+value, writes manual zoom only if different, and verifies readback. There is no
+software zoom fallback. The Robo default is 282 increments, native value 382 on
+the tested Anker C200 (100–400, step 1). A driver without fixed zoom support must
+have the option disabled. The control code reuses an existing COM apartment when
+OpenCV has already initialized the capture thread.
+
 ## Clicking and pause
 
-The toolbar order is Play/Pause, single left, double left, SketchUp, triple left,
-right click, drag, middle, scroll and main window. Keyboard, configuration, setup
+The toolbar order is click Play/Pause, single left, double left, SketchUp double,
+SketchUp triple, right click, drag, middle, scroll, main window and full pause.
+Keyboard, configuration, setup
 and help are available in the main window. Icons have three mouse buttons with
 the wheel inside the middle one; the relevant button or wheel is red. Modifiers sit
 at the bottom right: a 2/3 badge for double/triple, four arrows for drag and an
-up/down arrow for scroll. SketchUp is a cube with a red top face and a 2 badge.
+up/down arrow for scroll. SketchUp uses matching cubes with 2 and 3 badges.
 State is shown by the button face: mint with a teal marker when selected, a
 padlock badge when locked, and amber Play/Pause with dimmed click icons when paused.
 
 Pause disables desktop clicks, releases held buttons and cancels pending actions.
 Camera acquisition and head-driven pointer movement continue. Dwelling on Play
-still resumes clicking. Paused mode cannot generate other toolbar dwell actions.
-Physical mouse actions remain available.
+still resumes clicking; the full-pause button remains reachable as well. Other
+toolbar dwell actions are suspended while click-only pause is active.
+Physical mouse actions remain available. The final full-pause button stops both
+webcam-driven movement and clicks, cancels pending input and resets motion history.
+Camera preview continues. Dwell is suspended during full pause, preventing an
+immediate unintended resume under the stationary pointer. Resume with a physical
+click or the configurable full-pause hotkey (F8 by default). The previous click-only
+pause state is retained when resuming full pause.
 
 Normal selection is temporary; selecting it again locks it. Fast mode selects on
 hover and locks on activation. Drag holds the selected single mouse button until
@@ -52,9 +68,15 @@ or change the user's saved Windows cursor scheme. Sound feedback uses the embedd
 original eViacam click audio, with its alternate sound when starting a drag.
 
 SketchUp mode checks the application under the pointer, activates its Select tool
-with Space, then sends a paced left double click at a fixed position. If foreground
+with Space, then sends a paced left double or triple click at a fixed position.
+Both use the same timing function; the triple adds one down/up pair. If foreground
 focus changes during the sequence, pending input is cancelled. It uses SketchUp's
 default Space shortcut and is intended for the model viewport.
+
+Native Anker acceptance checks use an isolated profile and `--fully-paused`:
+set a different driver value, verify startup restores 382, restart at 382 and
+verify `driver_zoom.applied` is false. Both runs must capture frames while
+`input_events_sent` remains zero. Restore the original driver value after testing.
 
 ## Runtime and startup
 

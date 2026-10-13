@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod camera_options;
+mod capture;
 mod click_feedback;
 mod desktop_test;
 mod drawing;
@@ -97,7 +98,11 @@ const BAR_ACTIONS: [(u16, &str, ClickAction); 9] = [
     (203, "Middle click", ClickAction::Middle),
     (204, "Right click", ClickAction::Right),
     (205, "Double click", ClickAction::Double),
-    (206, "Triple click", ClickAction::Triple),
+    (
+        206,
+        "SketchUp: select connected (triple click)",
+        ClickAction::SketchUpConnected,
+    ),
     (207, "Drag", ClickAction::Drag),
     (208, "Scroll", ClickAction::Scroll),
     (
@@ -107,17 +112,18 @@ const BAR_ACTIONS: [(u16, &str, ClickAction); 9] = [
     ),
 ];
 
-const BAR_BUTTONS: [(u16, &str); 10] = [
+const BAR_BUTTONS: [(u16, &str); 11] = [
     (210, "Enable / pause"),
     (202, "Left click"),
     (205, "Double click"),
     (211, "SketchUp: edit group/component"),
-    (206, "Triple click"),
+    (206, "SketchUp: select connected (triple click)"),
     (204, "Right click"),
     (207, "Drag"),
     (203, "Middle click"),
     (208, "Scroll"),
     (209, "Show main window"),
+    (212, "Pause / resume movement and clicks"),
 ];
 
 fn wide(s: &str) -> Vec<u16> {
@@ -184,6 +190,7 @@ struct BarVisualState {
     drag: bool,
     scroll: bool,
     enabled: bool,
+    full_paused: bool,
     held: Option<MouseButton>,
 }
 
@@ -209,6 +216,10 @@ struct App {
     frame: Option<VisionFrame>,
     last_frame: u64,
     enabled: bool,
+    full_paused: bool,
+    zoom_query: Option<Receiver<(CameraPreference, Result<cameras::DriverZoom, String>)>>,
+    zoom_capabilities: Option<(CameraPreference, Result<cameras::DriverZoom, String>)>,
+    driver_zoom_state: Option<Result<cameras::DriverZoom, String>>,
     status: String,
     last_status: String,
     controls: Vec<(HWND, u8)>,
@@ -284,12 +295,51 @@ pub fn run() {
             }
             return;
         }
+        if let Some(path) = argument("--camera-zoom-report") {
+            let result = (|| -> Result<serde_json::Value, String> {
+                let devices = cameras::enumerate()?;
+                let selected = if let Some(name) = argument("--camera-name") {
+                    let matches: Vec<_> = devices.iter().filter(|d| d.name == *name).collect();
+                    if matches.len() != 1 {
+                        return Err("Camera name must identify exactly one device.".into());
+                    }
+                    matches[0].clone()
+                } else {
+                    let (settings, _) = Settings::load();
+                    cameras::resolve(&devices, settings.profile().camera.as_ref())?.clone()
+                };
+                let increments = argument("--camera-zoom-increments")
+                    .map(|v| v.parse::<u32>())
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
+                let zoom = cameras::driver_zoom(&selected.preference(), increments)?;
+                Ok(serde_json::json!({"camera":selected.preference(),"zoom":zoom}))
+            })();
+            let report = match &result {
+                Ok(report) => report.clone(),
+                Err(error) => serde_json::json!({"error":error}),
+            };
+            let written = std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
+            if result.is_err() || written.is_err() {
+                std::process::exit(1);
+            }
+            return;
+        }
+        if args.iter().any(|s| s == "--request-exit") {
+            let running = FindWindowW(wide_raw(APP_CLASS).as_ptr(), wide_raw("robocam").as_ptr());
+            if !running.is_null() {
+                PostMessageW(running, WM_COMMAND, usize::from(QUIT), 0);
+            }
+            return;
+        }
         if args.iter().any(|s| s == "--version") {
             return;
         }
         let desktop_test = args.iter().any(|s| s == "--desktop-test");
         let auto_close = desktop_test || args.iter().any(|s| s == "--smoke-test");
-        let dry_run = auto_close || args.iter().any(|s| s == "--ui-test");
+        let dry_run = auto_close
+            || argument("--capture-ui").is_some()
+            || args.iter().any(|s| s == "--ui-test");
         if let Some(mode) = argument("--configure-startup") {
             if !matches!(mode.as_str(), "enable" | "disable") {
                 std::process::exit(2);
@@ -401,6 +451,10 @@ pub fn run() {
             frame: None,
             last_frame: 0,
             enabled: false,
+            full_paused: args.iter().any(|arg| arg == "--fully-paused"),
+            zoom_query: None,
+            zoom_capabilities: None,
+            driver_zoom_state: None,
             status: "Starting camera…".into(),
             last_status: String::new(),
             controls: Vec::new(),
@@ -482,8 +536,10 @@ pub fn run() {
         if !dry_run {
             let _ = opencv::core::set_num_threads(1);
         }
-        app.enabled =
-            app.config.startup_enabled() && !dry_run && !args.iter().any(|arg| arg == "--paused");
+        app.enabled = argument("--capture-ui").is_some()
+            || (app.config.startup_enabled()
+                && !dry_run
+                && !args.iter().any(|arg| arg == "--paused"));
         if !dry_run {
             app.start_camera();
         }
@@ -520,6 +576,15 @@ pub fn run() {
             message(hwnd, &warning);
         }
         drop(setup_guard);
+        if let Some(directory) = argument("--capture-ui") {
+            capture::start(
+                directory.into(),
+                app.hwnd,
+                app.bar,
+                app.options,
+                scale(app.bar_size[0], app.dpi_for(app.bar)),
+            );
+        }
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             if messages::route(&msg) {
@@ -544,7 +609,7 @@ pub fn run() {
         if !app.mouse_hook.is_null() {
             UnhookWindowsHookEx(app.mouse_hook);
         }
-        for id in 1..=7 {
+        for id in 1..=8 {
             UnregisterHotKey(hwnd, id);
         }
         for (_, font) in app.dpi_fonts.drain(..) {
@@ -767,6 +832,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_HOTKEY => {
             match wp {
                 1 => app.toggle(),
+                8 => app.toggle_full_pause(),
                 2 => {
                     app.release_all();
                     app.move_cursor(screen_center());
@@ -1354,7 +1420,13 @@ impl App {
             if matches!(id, 202 | 209) {
                 offset += gap;
             }
-            let title = if thin && id == 211 { "SketchUp" } else { label };
+            let title = if thin && id == 211 {
+                "SketchUp 2"
+            } else if thin && id == 206 {
+                "SketchUp 3"
+            } else {
+                label
+            };
             let width = if thin {
                 if vertical {
                     160
@@ -1402,6 +1474,7 @@ impl App {
             drag: self.click.drag_enabled(),
             scroll: self.click.scrolling(),
             enabled: self.enabled,
+            full_paused: self.full_paused,
             held: self.click.held_button(),
         };
         if self.bar_visual_state == Some(state) {
@@ -1409,7 +1482,7 @@ impl App {
         }
         self.bar_visual_state = Some(state);
         if !self.bar.is_null() {
-            for id in 201..=211 {
+            for id in 201..=212 {
                 let control = GetDlgItem(self.bar, id);
                 if !control.is_null() {
                     InvalidateRect(control, null(), 0);
@@ -1543,6 +1616,7 @@ impl App {
         self.camera = Some(VisionWorker::start(VisionConfig {
             camera_index: p.camera_index,
             camera: p.camera.clone(),
+            camera_zoom_steps: p.camera_zoom_steps,
             track_face: p.track_face,
             stop_on_face_loss: p.stop_on_face_loss,
             face_timeout_ms: p.face_timeout_ms,
@@ -1595,6 +1669,7 @@ impl App {
         }
         self.poll_updates();
         self.poll_camera_discovery();
+        self.poll_zoom_range();
         let event = self.camera.as_ref().and_then(|camera| camera.try_recv());
         let mut displacement = None;
         if let Some(event) = event {
@@ -1621,7 +1696,9 @@ impl App {
                     self.status = if frame.tracking_valid {
                         format!(
                             "{} · {:.0} fps · {} points",
-                            if self.enabled {
+                            if self.full_paused {
+                                "Movement and clicks paused — use the hotkey or last button"
+                            } else if self.enabled {
                                 "Tracking"
                             } else {
                                 "Clicks paused — dwell on Play to resume"
@@ -1635,6 +1712,7 @@ impl App {
                     self.frame = Some(frame);
                     InvalidateRect(GetDlgItem(self.hwnd, PREVIEW as i32), null(), 0);
                 }
+                VisionEvent::Zoom(zoom) => self.driver_zoom_state = Some(zoom),
                 VisionEvent::Error(error) => {
                     self.status = error;
                     self.release_all();
@@ -1655,7 +1733,7 @@ impl App {
         let paused_by_mouse =
             physical > 0 && time.saturating_sub(physical) < self.config.profile().pause_on_mouse_ms;
         let tracking = self.tracking_ready();
-        if self.enabled && tracking && !paused_by_mouse {
+        if self.enabled && !self.full_paused && tracking && !paused_by_mouse {
             self.flush_pending_input(time);
         } else if (!tracking || paused_by_mouse)
             && (self.was_controlling || !self.pending_input.is_empty())
@@ -1669,7 +1747,7 @@ impl App {
             self.calibrate_frame(dx, dy, tracking);
         }
         if let Some((dx, dy)) = displacement {
-            if tracking && !paused_by_mouse && !calibrating {
+            if tracking && !self.full_paused && !paused_by_mouse && !calibrating {
                 self.was_controlling = true;
                 let movement =
                     self.motion
@@ -1718,8 +1796,12 @@ impl App {
 
     unsafe fn dispatch(&mut self, events: Vec<InputEvent>) {
         for event in events {
+            if self.full_paused && !matches!(event, InputEvent::ButtonUp(_)) {
+                continue;
+            }
             match event {
-                InputEvent::SketchUpEdit => self.sketchup_edit(),
+                InputEvent::SketchUpEdit => self.sketchup_click(2),
+                InputEvent::SketchUpConnected => self.sketchup_click(3),
                 InputEvent::MoveTo(x, y) => self.move_cursor((x, y)),
                 InputEvent::Click(button, count) => {
                     self.click_actions += 1;
@@ -1755,7 +1837,17 @@ impl App {
     }
 
     unsafe fn inject(&self, flags: u32, dx: i32, dy: i32, data: u32) {
-        if self.dry_run {
+        if self.dry_run
+            || (self.full_paused
+                && flags
+                    & (MOUSEEVENTF_MOVE
+                        | MOUSEEVENTF_LEFTDOWN
+                        | MOUSEEVENTF_RIGHTDOWN
+                        | MOUSEEVENTF_MIDDLEDOWN
+                        | MOUSEEVENTF_WHEEL
+                        | MOUSEEVENTF_HWHEEL)
+                    != 0)
+        {
             return;
         }
         let input = INPUT {
@@ -1849,6 +1941,10 @@ impl App {
             "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
             "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
             "profile":self.config.active_profile, "enabled":self.enabled,
+            "full_paused":self.full_paused,
+            "camera_zoom_steps":self.config.profile().camera_zoom_steps,
+            "driver_zoom":self.driver_zoom_state.as_ref().and_then(|result| result.as_ref().ok()),
+            "driver_zoom_error":self.driver_zoom_state.as_ref().and_then(|result| result.as_ref().err()),
             "camera":self.active_camera, "saved_camera":self.config.profile().camera,
             "cameras_detected":self.camera_devices.len(),
             "status":self.status, "frames_received":self.frames_received,
@@ -1912,6 +2008,16 @@ impl App {
         self.update_click_cursor();
     }
 
+    unsafe fn toggle_full_pause(&mut self) {
+        self.full_paused = !self.full_paused;
+        self.release_all();
+        self.motion.reset();
+        self.hover_id = 0;
+        self.hover_since = now();
+        self.hover_done = false;
+        self.refresh_bar_visuals();
+    }
+
     unsafe fn toggle(&mut self) {
         self.enabled = !self.enabled;
         self.release_all();
@@ -1930,13 +2036,14 @@ impl App {
         if self.dry_run {
             return;
         }
-        for id in 1..=7 {
+        for id in 1..=8 {
             UnregisterHotKey(self.hwnd, id);
         }
         for (id, key) in [
             (1, self.config.profile().toggle_key),
             (2, self.config.profile().center_key),
             (3, self.config.profile().workspace_key),
+            (8, self.config.profile().full_pause_key),
         ] {
             UnregisterHotKey(self.hwnd, id);
             if key != 0 && RegisterHotKey(self.hwnd, id, MOD_NOREPEAT, key) == 0 {
@@ -2060,6 +2167,29 @@ impl App {
 
         self.verify_click_feedback();
         self.verify_bar_pointer_geometry();
+        let enabled = self.enabled;
+        self.full_paused = false;
+        self.button(MouseButton::Left, true);
+        self.pending_input
+            .extend(click_sequence(now() + 500, MouseButton::Left, 3, 10, 50));
+        self.command(self.bar, 212, 0);
+        assert!(self.full_paused);
+        assert!(self.pending_input.is_empty());
+        assert!(!self.injected.iter().any(|pressed| *pressed));
+        let click_actions = self.click_actions;
+        self.dispatch(vec![
+            InputEvent::Click(MouseButton::Left, 3),
+            InputEvent::Scroll(0, 120),
+        ]);
+        assert_eq!(self.click_actions, click_actions);
+        self.pointer_actions(now() + 5000, MotionOutput::default(), cursor(), None);
+        assert!(
+            self.full_paused,
+            "dwell must not automatically resume full pause"
+        );
+        self.command(self.bar, 212, 0);
+        assert!(!self.full_paused);
+        assert_eq!(self.enabled, enabled);
         ShowWindow(self.bar, SW_HIDE);
         self.keep_bar_visible();
         assert_ne!(
@@ -2149,11 +2279,12 @@ unsafe extern "system" fn preview_proc(
 
 impl App {
     unsafe fn command(&mut self, source: HWND, id: u16, notification: u16) {
-        if notification != BN_CLICKED as u16 && !matches!(id, PAGE | PROFILE) {
+        if notification != BN_CLICKED as u16 && !matches!(id, PAGE | PROFILE | 440) {
             return;
         }
         match id {
             ENABLE | 210 | 201 => self.toggle(),
+            212 => self.toggle_full_pause(),
             OPTIONS => self.open_options(),
             KEYBOARD => {
                 if self.dry_run {
@@ -2335,6 +2466,8 @@ impl App {
             FORGET_CAMERA => {
                 SendMessageW(GetDlgItem(self.options, 440), CB_SETCURSEL, 0, 0);
             }
+            440 if notification == CBN_SELCHANGE as u16 => self.query_zoom_range(),
+            447 => self.update_zoom_options(),
             441 | 444 => self.update_camera_options(),
             RESET => {
                 self.release_all();
@@ -2365,7 +2498,7 @@ impl App {
             GetModuleHandleW(null()),
             self as *mut Self as *const c_void,
         );
-        self.prepare_window(self.options, 550, 562);
+        self.prepare_window(self.options, 550, 589);
         self.controls.clear();
         let profile = self.child(
             self.options,
@@ -2569,7 +2702,29 @@ impl App {
             6,
             "save, then drag a rectangle over your face in the preview.",
         );
-        self.note(2, 8, "Use good front lighting and aim for at least 25 fps.");
+        self.check(
+            2,
+            8,
+            447,
+            "Fixed zoom via camera driver",
+            p.camera_zoom_steps.is_some(),
+        );
+        self.edit(
+            2,
+            9,
+            448,
+            "Native zoom increments",
+            p.camera_zoom_steps.unwrap_or(0),
+        );
+        let zoom_note = self.child(
+            self.options,
+            "STATIC",
+            "Reading driver zoom range…",
+            449,
+            0,
+            [20, 364, 490, 48],
+        );
+        self.controls.push((zoom_note, 2));
         for (id, label, x) in [
             (REFRESH_CAMERAS, "Refresh cameras", 20),
             (FORGET_CAMERA, "Forget saved camera", 268),
@@ -2584,13 +2739,21 @@ impl App {
             );
             self.controls.push((button, 2));
         }
-        self.note(
-            2,
-            9,
-            "If the camera is unavailable, close other camera apps.",
-        );
-        self.page_button(2, 10, CAMERA_SETTINGS, "Camera driver settings…");
-        self.page_button(2, 11, RESET, "Reconnect camera");
+        for (id, label, x) in [
+            (CAMERA_SETTINGS, "Camera driver settings…", 20),
+            (RESET, "Reconnect camera", 268),
+        ] {
+            let button = self.child(
+                self.options,
+                "BUTTON",
+                label,
+                id,
+                WS_TABSTOP,
+                [x, 414, 242, 25],
+            );
+            self.controls.push((button, 2));
+        }
+        self.query_zoom_range();
 
         self.choice(
             3,
@@ -2656,6 +2819,12 @@ impl App {
             (1, 456, "Enable / pause hotkey", p.toggle_key),
             (2, 457, "Center pointer hotkey", p.center_key),
             (3, 458, "Workspace toggle hotkey", p.workspace_key),
+            (
+                13,
+                467,
+                "Pause movement and clicks hotkey",
+                p.full_pause_key,
+            ),
         ] {
             self.choice(
                 4,
@@ -2732,7 +2901,7 @@ impl App {
             "Save",
             SAVE,
             WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-            [308, 489, 98, 28],
+            [308, 516, 98, 28],
         );
         self.child(
             self.options,
@@ -2740,7 +2909,7 @@ impl App {
             "Cancel",
             CANCEL,
             WS_TABSTOP,
-            [414, 489, 98, 28],
+            [414, 516, 98, 28],
         );
         self.show_options_page();
         ShowWindow(self.options, SW_SHOW);
@@ -2822,17 +2991,6 @@ impl App {
         );
         self.controls.push((field, page));
     }
-    unsafe fn page_button(&mut self, page: u8, row: usize, id: u16, label: &str) {
-        let field = self.child(
-            self.options,
-            "BUTTON",
-            label,
-            id,
-            WS_TABSTOP,
-            [20, 90 + row as i32 * 27, 250, 25],
-        );
-        self.controls.push((field, page));
-    }
     unsafe fn show_options_page(&self) {
         for (hwnd, page) in &self.controls {
             ShowWindow(
@@ -2908,6 +3066,17 @@ impl App {
                 .get(self.selected(440))
                 .cloned()
                 .flatten();
+            p.camera_zoom_steps = if self.checked(447) {
+                let maximum = self
+                    .zoom_capabilities
+                    .as_ref()
+                    .and_then(|(_, range)| range.as_ref().ok())
+                    .ok_or("The selected camera has no verified native zoom range.")?
+                    .maximum_increments()?;
+                Some(self.number(448, 0, u64::from(maximum))? as u32)
+            } else {
+                None
+            };
             p.track_face = self.checked(441);
             p.stop_on_face_loss = self.checked(444);
             p.face_timeout_ms = self.number(442, 100, 59_000)?;
@@ -2929,11 +3098,17 @@ impl App {
             p.toggle_key = key(456);
             p.center_key = key(457);
             p.workspace_key = key(458);
+            p.full_pause_key = key(467);
             p.arrow_sensitivity = self.checked(462);
             p.event_delay_ms = self.number(464, 0, 50)?;
-            let hotkeys = [p.toggle_key, p.center_key, p.workspace_key];
-            for i in 0..3 {
-                for j in i + 1..3 {
+            let hotkeys = [
+                p.toggle_key,
+                p.center_key,
+                p.workspace_key,
+                p.full_pause_key,
+            ];
+            for i in 0..hotkeys.len() {
+                for j in i + 1..hotkeys.len() {
                     if hotkeys[i] != 0 && hotkeys[i] == hotkeys[j] {
                         return Err("Choose a different hotkey for each action.".into());
                     }

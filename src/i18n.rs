@@ -103,6 +103,26 @@ fn static_italian(text: &str) -> Option<&'static str> {
             "Nessuna telecamera rilevata. Collegane una e aggiorna l'elenco in Configurazione."
         }
         "SketchUp: edit group/component" => "SketchUp: modifica gruppo/componente",
+        "SketchUp: select connected (triple click)" => {
+            "SketchUp: seleziona collegati (triplo clic)"
+        }
+        "Use a SketchUp action over geometry in the SketchUp model view." => {
+            "Usa l'azione SketchUp sulla geometria nell'area del modello di SketchUp."
+        }
+        "Pause / resume movement and clicks" => "Pausa / riprendi movimento e clic",
+        "Pause movement and clicks hotkey" => "Tasto pausa movimento e clic",
+        "Movement and clicks paused — use the hotkey or last button" => {
+            "Movimento e clic in pausa — usa il tasto rapido o l'ultimo pulsante"
+        }
+        "Fixed zoom via camera driver" => "Zoom fisso tramite driver della webcam",
+        "Native zoom increments" => "Incrementi dello zoom nativo",
+        "Reading driver zoom range…" => "Lettura dei limiti zoom dal driver…",
+        "Driver range:" => "Valori driver:",
+        "step:" => "passo:",
+        "current:" => "attuale:",
+        "Increments:" => "Incrementi:",
+        "0 = driver value" => "0 = valore driver",
+        "Native zoom unavailable." => "Zoom nativo non disponibile.",
         "Use the SketchUp button over a group or component in the SketchUp model view." => {
             "Usa il pulsante SketchUp su un gruppo o componente nell'area del modello di SketchUp."
         }
@@ -338,6 +358,10 @@ fn formatted_italian(text: &str) -> Cow<'_, str> {
     // Translate only known wrappers; diagnostic details and user data stay intact.
     for (prefix, replacement) in [
         ("Tracking · ", "Controllo attivo · "),
+        (
+            "Movement and clicks paused — use the hotkey or last button · ",
+            "Movimento e clic in pausa — tasto rapido o ultimo pulsante · ",
+        ),
         (
             "Clicks paused — dwell on Play to resume · ",
             "Click in pausa — soffermati su Play · ",

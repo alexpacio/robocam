@@ -5,7 +5,8 @@ OpenCV face detection and optical-flow tracking. Camera images stay on the PC.
 
 ## Install and start
 
-Run the installer from `dist`. It installs under `Program Files\robocam` and
+Download the installer from [GitHub Releases](https://github.com/alexpacio/robocam/releases/latest).
+It installs under `Program Files\robocam` and
 requests administrator permission so input can reach elevated desktop applications,
 including Task Manager and the Windows on-screen keyboard. Login startup is checked
 by default and uses a highest-privilege interactive task for the current user.
@@ -25,19 +26,52 @@ With no saved camera, a single detected camera opens automatically; multiple cam
 prompt for a choice. **Refresh cameras** updates the list. **Forget saved camera**
 selects automatic mode; press **Save** to apply the reset.
 
+### Fixed native webcam zoom
+
+Enable **Configuration > Camera > Fixed zoom via camera driver** and set
+**Native zoom increments**. Robocam reads the selected device's minimum, maximum
+and step using Windows `IAMCameraControl`, and requests `minimum + increments × step`.
+It reads zoom at every camera start/reconnect and sends a manual driver command
+only if the value differs, then reads it back to verify the result.
+
+The **Anker PowerConf C200** exposes 100–400 in steps of 1. The **Robo** profile uses
+**282 increments**, giving native value **382**. These are driver units, not a
+claim of optical magnification. Zoom is performed by the camera/driver; robocam
+does not crop or enlarge frames to imitate zoom. An unsupported driver or an
+out-of-range setting produces an explicit error. Disable fixed zoom to leave the
+driver's setting alone.
+
+![Camera settings and native Anker zoom range](docs/images/camera-settings.png)
+
 ## Pointer and click toolbar
 
 Move your head to move the pointer and stop over a target to click. **Pause stops
 screen clicks only**: video and head-driven pointer movement continue. Dwell on
-**Play** to resume; other toolbar dwell actions are disabled while paused.
+**Play** to resume. The separate **last button** pauses both movement and clicks;
+camera preview continues, held buttons are released and pending clicks are cancelled.
+Resume full pause with a physical click on that button or **F8** (configurable in
+General settings). A stationary pointer cannot automatically resume full pause.
 
 The toolbar fills the screen width, keeps buttons on the left and reserves desktop
 space so maximized windows do not overlap it. The order is:
 
-1. Play/pause (one button that changes with the current state).
-2. Single left, double left, SketchUp group/component editing, triple left.
-3. Right click, drag (four-arrow cross), middle click, wheel scrolling.
-4. Main window.
+![The eleven toolbar controls](docs/images/topbar.png)
+
+| Position | Control | Action |
+| --- | --- | --- |
+| 1 | Play/pause clicks | Toggle clicks while head movement continues. |
+| 2 | Left click | One left click. |
+| 3 | Double click | Standard double left click. |
+| 4 | SketchUp cube 2 | Select tool, then paced double click to edit a group/component. |
+| 5 | SketchUp cube 3 | Select tool, then paced triple click to select connected geometry. |
+| 6 | Right click | Open a context menu. |
+| 7 | Drag | Hold the selected mouse button, move, then dwell to release. |
+| 8 | Middle click | One middle click. |
+| 9 | Scroll | Move your head to scroll while the pointer stays fixed. |
+| 10 | Main window | Restore the camera window from the tray. |
+| 11 | Pause movement and clicks | Stop/resume all webcam-generated mouse input. |
+
+![Full pause: the last button becomes Resume](docs/images/topbar-paused.png)
 
 The bar stays visible until robocam exits, including Show Desktop, desktop Peek,
 and minimizing or hiding the webcam window. Old hide-bar preferences are ignored.
@@ -58,8 +92,10 @@ action finishes or is cancelled. This option is saved per profile and starts off
 Zero-duration clicks also have zero-duration cursor feedback. Click sounds use
 eViacam's original audio, embedded in the executable.
 
+![Click timing and feedback settings](docs/images/click-settings.png)
+
 Mouse icons have three buttons with the wheel inside the middle one; the relevant
-button or wheel is red. Double and triple clicks carry a 2 or 3 badge at the bottom
+button or wheel is red. SketchUp controls share a cube with a 2 or 3 badge at the bottom
 right, where drag and scroll show their arrows. The selected action has a mint
 button with a teal marker, a locked action adds a padlock badge, and pause turns
 Play/Pause amber and dims the click actions. There is no floating cursor progress bar.
@@ -74,15 +110,25 @@ Fast mode selects on hover and locks on activation. Drag applies to the selected
 single mouse button: dwell to hold, move, then dwell again to release. Wheel mode
 freezes the pointer while head motion scrolls; move and stop again to finish.
 
-The **SketchUp** action uses Space to select the Select tool, then a paced double
-left click at the target. Use it over a group/component in the model viewport.
-It checks the target application and cancels pending input if focus changes.
+Both **SketchUp** actions use Space to activate the Select tool, then send two or
+three paced left clicks at the target. Their timing is identical: with Windows'
+usual double-click interval, the gap from release to the next press is 50 ms; default hold time
+is 10 ms unless the profile explicitly sets a different press duration. Triple
+click adds a third press to the same sequence. Head movement is frozen during it.
+The old generic triple-click toolbar button is replaced by the SketchUp cube 3.
+Both actions check the target application and cancel pending input if focus changes.
+Triple click selects **all connected geometry in the current editing context**,
+which can include connected faces as well as a chain of edges. Use it inside the
+intended group/component. See SketchUp's [selection documentation](https://help.sketchup.com/en/sketchup/selecting-geometry).
 This uses SketchUp's [default shortcuts](https://help.sketchup.com/en/default-keyboard-shortcuts)
 and [group editing behavior](https://help.sketchup.com/en/sketchup/grouping-geometry).
 
-Default hotkeys are F11 (pause/resume clicks), F10 (center pointer) and F9 (workspace
-limits). They can be changed or disabled. Closing the main window hides it in the
+Default hotkeys are F11 (pause/resume clicks), F10 (center pointer), F9 (workspace
+limits), and F8 (pause/resume movement and clicks). They can be changed or disabled.
+Closing the main window hides it in the
 tray; use File > Exit or the tray menu to terminate.
+
+![General settings with the configurable F8 full-pause hotkey](docs/images/general-settings.png)
 
 ## Robo profile
 
@@ -98,14 +144,21 @@ with Save as; the built-in profile cannot be deleted.
 | Clicks enabled at startup | On |
 | Dwell / tolerance / consecutive clicks | 400 ms / 2 / off |
 | Click sound / physical mouse cooldown | Off / 0 ms |
-| Hotkeys | Disabled |
+| Fixed driver zoom | 282 increments; Anker native value 382 |
+| Hotkeys | F8 for full pause; other hotkeys disabled |
 | Keyboard / event delay | `osk.exe` / 0 ms |
 | Automatic face location / detection interval | On / 100 ms |
 | Stop on classifier face loss | Off; timeout stored as 5 seconds |
 
 Camera failure or loss of reliable optical-flow features always releases held
 buttons. Calibration and the live preview use the same tracking-readiness check
-as pointer movement. Movement pauses only during calibration measurements.
+as pointer movement. Full pause also stops movement without stopping camera preview.
+
+![Main camera window, captured with camera acquisition disabled](docs/images/main-window.png)
+
+Screenshots show the actual Italian Windows interface in the documentation capture
+mode: no webcam frames or personal images are captured. The camera settings image
+reads the real Anker driver's capabilities on the test PC.
 
 Settings are stored in `%APPDATA%\robocam\settings.json`; uninstall retains them.
 The interface offers English and Italian.

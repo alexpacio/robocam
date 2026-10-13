@@ -2,6 +2,45 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverZoom {
+    pub minimum: i32,
+    pub maximum: i32,
+    pub step: i32,
+    pub default: i32,
+    pub current: i32,
+    pub flags: i32,
+    #[serde(default)]
+    pub applied: bool,
+}
+
+impl DriverZoom {
+    pub fn maximum_increments(&self) -> Result<u32, String> {
+        if self.step <= 0 || self.maximum < self.minimum {
+            return Err("The camera driver returned an invalid zoom range.".into());
+        }
+        Ok(((i64::from(self.maximum) - i64::from(self.minimum)) / i64::from(self.step)) as u32)
+    }
+    pub fn value_at(&self, increments: u32) -> Result<i32, String> {
+        let maximum = self.maximum_increments()?;
+        if increments > maximum {
+            return Err(format!(
+                "Driver zoom increments must be between 0 and {maximum}."
+            ));
+        }
+        Ok((i64::from(self.minimum) + i64::from(increments) * i64::from(self.step)) as i32)
+    }
+}
+
+/// Uses IAMCameraControl on the selected physical device. No image resize/crop.
+#[cfg(windows)]
+pub fn driver_zoom(
+    camera: &CameraPreference,
+    increments: Option<u32>,
+) -> Result<DriverZoom, String> {
+    native::driver_zoom(camera, increments)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CameraPreference {
     pub id: String,
     pub name: String,
@@ -79,13 +118,19 @@ mod native {
     use ::windows::{
         Win32::{
             Devices::DeviceAndDriverInstallation::*,
-            Media::{DirectShow::ICreateDevEnum, MediaFoundation::*},
+            Media::{
+                DirectShow::{
+                    CameraControl_Flags_Manual, CameraControl_Zoom, IAMCameraControl, IBaseFilter,
+                    ICreateDevEnum,
+                },
+                MediaFoundation::*,
+            },
             System::{
                 Com::{StructuredStorage::IPropertyBag, *},
                 Variant::{VARIANT, VT_BSTR, VariantClear},
             },
         },
-        core::{GUID, PWSTR, w},
+        core::{GUID, Interface, PWSTR, w},
     };
 
     struct Com;
@@ -246,6 +291,120 @@ mod native {
         }
     }
 
+    pub(super) fn driver_zoom(
+        camera: &CameraPreference,
+        increments: Option<u32>,
+    ) -> Result<DriverZoom, String> {
+        unsafe {
+            // OpenCV's DirectShow capture has already initialized this thread
+            // as STA. Reuse that apartment; only uninitialize our own success.
+            let initialized = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let _com = if initialized.is_ok() {
+                Some(Com)
+            } else if initialized == ::windows::Win32::Foundation::RPC_E_CHANGED_MODE {
+                None
+            } else {
+                return Err(initialized.message());
+            };
+            let read = || -> Result<DriverZoom, String> {
+                let enumerator: ICreateDevEnum =
+                    CoCreateInstance(&CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|e| e.to_string())?;
+                let mut monikers = None;
+                enumerator
+                    .CreateClassEnumerator(&CLSID_VideoInputDeviceCategory, &mut monikers, 0)
+                    .map_err(|e| e.to_string())?;
+                if let Some(monikers) = monikers {
+                    loop {
+                        let mut item = [None];
+                        let mut fetched = 0;
+                        monikers
+                            .Next(&mut item, Some(&mut fetched))
+                            .ok()
+                            .map_err(|e| e.to_string())?;
+                        if fetched == 0 {
+                            break;
+                        }
+                        let Some(moniker) = item[0].take() else {
+                            continue;
+                        };
+                        let bag: IPropertyBag = moniker
+                            .BindToStorage(None::<&IBindCtx>, None::<&IMoniker>)
+                            .map_err(|e| e.to_string())?;
+                        let Some(path) = property(&bag, w!("DevicePath")) else {
+                            continue;
+                        };
+                        if !camera.id.eq_ignore_ascii_case(&device_identity(&path))
+                            && !camera.id.eq_ignore_ascii_case(&canonical_id(&path))
+                        {
+                            continue;
+                        }
+                        let filter: IBaseFilter = moniker
+                            .BindToObject(None::<&IBindCtx>, None::<&IMoniker>)
+                            .map_err(|e| e.to_string())?;
+                        let control: IAMCameraControl = filter.cast().map_err(|_| {
+                            "This camera driver does not expose native zoom control.".to_string()
+                        })?;
+                        let mut zoom = DriverZoom {
+                            minimum: 0,
+                            maximum: 0,
+                            step: 0,
+                            default: 0,
+                            current: 0,
+                            flags: 0,
+                            applied: false,
+                        };
+                        let mut capabilities = 0;
+                        control
+                            .GetRange(
+                                CameraControl_Zoom.0,
+                                &mut zoom.minimum,
+                                &mut zoom.maximum,
+                                &mut zoom.step,
+                                &mut zoom.default,
+                                &mut capabilities,
+                            )
+                            .map_err(|_| {
+                                "This camera driver does not support native zoom.".to_string()
+                            })?;
+                        if capabilities & CameraControl_Flags_Manual.0 == 0 {
+                            return Err(
+                                "This camera driver does not support fixed manual zoom.".into()
+                            );
+                        }
+                        zoom.maximum_increments()?;
+                        control
+                            .Get(CameraControl_Zoom.0, &mut zoom.current, &mut zoom.flags)
+                            .map_err(|e| e.to_string())?;
+                        if let Some(increments) = increments {
+                            let target = zoom.value_at(increments)?;
+                            if zoom.current != target {
+                                control
+                                    .Set(CameraControl_Zoom.0, target, CameraControl_Flags_Manual.0)
+                                    .map_err(|e| format!("Could not apply driver zoom: {e}"))?;
+                                zoom.applied = true;
+                            }
+                        }
+                        control
+                            .Get(CameraControl_Zoom.0, &mut zoom.current, &mut zoom.flags)
+                            .map_err(|e| e.to_string())?;
+                        if let Some(increments) = increments
+                            && (zoom.current != zoom.value_at(increments)?
+                                || zoom.flags & CameraControl_Flags_Manual.0 == 0)
+                        {
+                            return Err(
+                                "The camera driver did not retain the requested fixed zoom.".into(),
+                            );
+                        }
+                        return Ok(zoom);
+                    }
+                }
+                Err(format!("Saved camera unavailable: {}", camera.name))
+            };
+            read()
+        }
+    }
+
     unsafe fn mf_string(device: &IMFActivate, key: &GUID) -> Option<String> {
         unsafe {
             let mut value = PWSTR::null();
@@ -328,6 +487,57 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_zoom_uses_native_step_grid_and_rejects_out_of_range_values() {
+        let mut zoom = DriverZoom {
+            minimum: 100,
+            maximum: 400,
+            step: 1,
+            default: 100,
+            current: 382,
+            flags: 2,
+            applied: false,
+        };
+        assert_eq!(zoom.value_at(282), Ok(382));
+        assert_eq!(zoom.maximum_increments(), Ok(300));
+        assert!(zoom.value_at(301).is_err());
+        zoom.minimum = -10;
+        zoom.maximum = 13;
+        zoom.step = 5;
+        assert_eq!(zoom.maximum_increments(), Ok(4));
+        assert_eq!(zoom.value_at(4), Ok(10));
+        zoom.step = 0;
+        assert!(zoom.value_at(0).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zoom_lookup_reuses_an_existing_sta_capture_apartment() {
+        std::thread::spawn(|| unsafe {
+            use ::windows::Win32::System::Com::*;
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            let result = driver_zoom(
+                &CameraPreference {
+                    id: "robocam-missing-test-device".into(),
+                    name: "Missing test device".into(),
+                },
+                None,
+            );
+            let mut apartment = APTTYPE_CURRENT;
+            let mut qualifier = APTTYPEQUALIFIER_NONE;
+            let remains_initialized = CoGetApartmentType(&mut apartment, &mut qualifier);
+            CoUninitialize();
+            assert_eq!(
+                result.unwrap_err(),
+                "Saved camera unavailable: Missing test device"
+            );
+            assert!(remains_initialized.is_ok());
+            assert!(matches!(apartment, APTTYPE_STA | APTTYPE_MAINSTA));
+        })
+        .join()
+        .unwrap();
+    }
     fn device(id: &str, index: i32) -> CameraDevice {
         CameraDevice {
             id: id.into(),

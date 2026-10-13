@@ -11,6 +11,7 @@ pub struct Profile {
     pub click: ClickSettings,
     pub camera_index: i32,
     pub camera: Option<crate::cameras::CameraPreference>,
+    pub camera_zoom_steps: Option<u32>,
     pub track_face: bool,
     pub stop_on_face_loss: bool,
     pub face_timeout_ms: u64,
@@ -26,6 +27,7 @@ pub struct Profile {
     pub pause_on_mouse_ms: u64,
     pub keyboard_command: String,
     pub toggle_key: u32,
+    pub full_pause_key: u32,
     pub center_key: u32,
     pub workspace_key: u32,
     pub arrow_sensitivity: bool,
@@ -42,6 +44,7 @@ impl Default for Profile {
             click: ClickSettings::default(),
             camera_index: 0,
             camera: None,
+            camera_zoom_steps: None,
             track_face: true,
             stop_on_face_loss: true,
             face_timeout_ms: 500,
@@ -57,6 +60,7 @@ impl Default for Profile {
             pause_on_mouse_ms: 1000,
             keyboard_command: "osk.exe".into(),
             toggle_key: 0x7A,
+            full_pause_key: 0x77,
             center_key: 0x79,
             workspace_key: 0x78,
             arrow_sensitivity: false,
@@ -70,6 +74,8 @@ impl Profile {
     /// User-supplied configuration for the built-in Robo preset.
     pub fn robo() -> Self {
         Self {
+            // Anker PowerConf C200: driver range 100..400, step 1; 100 + 282 = 382.
+            camera_zoom_steps: Some(282),
             motion: MotionSettings {
                 speed_x: 9,
                 speed_y: 9,
@@ -343,6 +349,8 @@ mod tests {
         assert_eq!(robo.enabled_at_startup, Some(true));
         assert_eq!(robo.keyboard_command, "osk.exe");
         assert_eq!(robo.event_delay_ms, 0);
+        assert_eq!(robo.camera_zoom_steps, Some(282));
+        assert_eq!(robo.full_pause_key, 0x77);
         assert_eq!(robo.click.dwell_ms, 400);
         assert_eq!(robo.click.tolerance_px, 2);
         assert!(!robo.click.consecutive);
@@ -425,6 +433,27 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
         assert!(loaded.profile().black_cursor_on_click);
         assert!(!loaded.profiles[ROBO_PROFILE_NAME].black_cursor_on_click);
+    }
+
+    #[test]
+    fn zoom_and_full_pause_preferences_roundtrip_without_changing_other_profiles() {
+        let mut settings = Settings::default();
+        settings
+            .profiles
+            .get_mut(ROBO_PROFILE_NAME)
+            .unwrap()
+            .camera_zoom_steps = Some(180);
+        settings.profile_mut().full_pause_key = 0;
+        let restored: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored.profiles[ROBO_PROFILE_NAME].camera_zoom_steps,
+            Some(180)
+        );
+        assert!(restored.profile().camera_zoom_steps.is_none());
+        assert_eq!(restored.profile().full_pause_key, 0);
+        let legacy: Profile = serde_json::from_str("{}").unwrap();
+        assert!(legacy.camera_zoom_steps.is_none());
     }
     #[test]
     fn profile_roundtrip_preserves_independent_settings() {

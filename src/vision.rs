@@ -37,6 +37,7 @@ static CAMERA_SESSION: Mutex<()> = Mutex::new(());
 pub struct VisionConfig {
     pub camera_index: i32,
     pub camera: Option<CameraPreference>,
+    pub camera_zoom_steps: Option<u32>,
     pub track_face: bool,
     pub stop_on_face_loss: bool,
     pub face_timeout_ms: u64,
@@ -50,6 +51,7 @@ impl Default for VisionConfig {
         Self {
             camera_index: 0,
             camera: None,
+            camera_zoom_steps: None,
             track_face: true,
             stop_on_face_loss: true,
             face_timeout_ms: 5_000,
@@ -95,6 +97,7 @@ pub enum VisionEvent {
         selected: Option<CameraDevice>,
     },
     Frame(VisionFrame),
+    Zoom(Result<cameras::DriverZoom, String>),
     Error(String),
     Stopped,
 }
@@ -102,6 +105,7 @@ pub enum VisionEvent {
 #[derive(Default)]
 struct Mailbox {
     cameras: Option<(Vec<CameraDevice>, Option<CameraDevice>)>,
+    zoom: Option<Result<cameras::DriverZoom, String>>,
     frame: Option<VisionFrame>,
     pending_since: Option<Instant>,
     error: Option<String>,
@@ -181,6 +185,9 @@ impl VisionWorker {
         }
         if let Some(error) = mailbox.error.take() {
             return Some(VisionEvent::Error(error));
+        }
+        if let Some(zoom) = mailbox.zoom.take() {
+            return Some(VisionEvent::Zoom(zoom));
         }
         if mailbox.stopped {
             mailbox.stopped = false;
@@ -373,8 +380,15 @@ fn run_camera(
     let selected = cameras::resolve(&devices, config.camera.as_ref()).cloned();
     mailbox.lock().unwrap_or_else(|p| p.into_inner()).cameras =
         Some((devices, selected.as_ref().ok().cloned()));
-    let mut camera = open_camera(&selected?, stop)?;
-    let result = process_camera(&mut camera, &config, stop, settings, mailbox);
+    let selected = selected?;
+    let mut camera = open_camera(&selected, stop)?;
+    // Apply after capture configuration: some drivers reset controls on open.
+    let zoom = cameras::driver_zoom(&selected.preference(), config.camera_zoom_steps);
+    mailbox.lock().unwrap_or_else(|p| p.into_inner()).zoom = Some(zoom.clone());
+    let result = match zoom {
+        Err(error) if config.camera_zoom_steps.is_some() => Err(error),
+        _ => process_camera(&mut camera, &config, stop, settings, mailbox),
+    };
     let _ = camera.release();
     result
 }
@@ -818,6 +832,7 @@ mod tests {
                 Some(VisionEvent::Error(_)) => saw_error = true,
                 Some(VisionEvent::Stopped) => saw_stop = true,
                 Some(VisionEvent::Frame(_)) => panic!("invalid camera delivered a frame"),
+                Some(VisionEvent::Zoom(_)) => panic!("invalid camera exposed zoom controls"),
                 Some(VisionEvent::Cameras { .. }) => {
                     panic!("invalid camera should fail before enumeration")
                 }
