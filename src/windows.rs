@@ -594,6 +594,11 @@ pub fn run() {
                 SW_SHOW
             },
         );
+        if app.updater.result.is_some() && !minimized {
+            // The hidden updater launcher can override the first ShowWindow
+            // through STARTUPINFO. Restore the recorded visible state explicitly.
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
         SetTimer(hwnd, 1, 15, None);
         if dry_run {
             app.open_options();
