@@ -189,6 +189,8 @@ published SHA-256 checksum, installs it and restarts automatically. There is no
 browser download or separate installer wizard to complete. Head control stays
 active during download and preparation; **Cancel** stops before installation.
 
+![Download and install directly from Robocam](docs/images/update-available.png)
+
 The optional startup check also offers newer stable
 [GitHub Releases](https://github.com/alexpacio/robocam/releases), using
 `https://api.github.com/repos/alexpacio/robocam/releases/latest` and semantic version
@@ -203,7 +205,7 @@ A required Windows restart is reported; Robocam never reboots the PC automatical
 Downloads, recovery copies and installation logs are kept under
 `%ProgramFiles%\robocam-update-cache` for troubleshooting. Camera images are never uploaded.
 
-**Upgrading from 0.6.0 or older:** install 0.7.0 once from Releases. Those older
+**Upgrading from 0.6.0 or older:** install 0.7.0 or later once from Releases. Those older
 versions do not contain the installer updater; later releases can be installed in-app.
 
 ## Build

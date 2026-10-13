@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1 - 2026-10-13
+
+- Preserve the main window's live visibility when restarting after an update,
+  even when the normal startup preference is minimized. The fix also reads the
+  handoff written by 0.7.0, so updates from that version restore an open window.
+- Added regression coverage for visible/hidden update restarts and missing or
+  invalid legacy state. Kept the documented minimum updater version at 0.7.0.
+- Added a screenshot of the actual in-app update offer to the README.
+
 ## 0.7.0 - 2026-10-13
 
 - Added in-app Download and install to Check for updates, with a modeless progress

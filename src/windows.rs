@@ -581,7 +581,11 @@ pub fn run() {
         if app.config.check_updates && !dry_run && app.updater.result.is_none() {
             app.updater.check(hwnd, false);
         }
-        let minimized = args.iter().any(|s| s == "--minimized") || app.config.minimized_at_startup;
+        let minimized = updater::start_minimized(
+            args.iter().any(|s| s == "--minimized"),
+            app.config.minimized_at_startup,
+            app.updater.result.as_deref(),
+        );
         ShowWindow(
             hwnd,
             if minimized && !dry_run {

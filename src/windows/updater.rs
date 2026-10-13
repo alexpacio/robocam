@@ -7,6 +7,22 @@ use std::{
 use updates::{DownloadEvent, ReleaseInstaller, UpdateResult};
 
 const CLASS: &str = "robocam.updater";
+
+/// The update handoff records the live window state. It takes precedence over
+/// the normal login preference, including when upgrading from the 0.7.0 helper.
+fn restart_minimized(report: &std::path::Path) -> Option<bool> {
+    let bytes = std::fs::read(report.parent()?.join("restart-state.json")).ok()?;
+    let state: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    state["minimized"].as_bool()
+}
+
+pub(super) fn start_minimized(
+    explicit: bool,
+    preference: bool,
+    report: Option<&std::path::Path>,
+) -> bool {
+    explicit || report.and_then(restart_minimized).unwrap_or(preference)
+}
 thread_local! {
     static WINDOW: std::cell::Cell<HWND> = const { std::cell::Cell::new(null_mut()) };
     static COMMAND: std::cell::Cell<u16> = const { std::cell::Cell::new(0) };
@@ -443,5 +459,38 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn update_restart_uses_live_visibility_and_handles_legacy_or_invalid_state() {
+        let root =
+            std::env::temp_dir().join(format!("robocam-update-visibility-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = root.join("restart-state.json");
+        let report = root.join("result.json");
+        for minimized in [false, true] {
+            std::fs::write(
+                &state,
+                serde_json::json!({"minimized":minimized}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(restart_minimized(&report), Some(minimized));
+            // The live state wins even when the saved startup preference differs.
+            assert_eq!(start_minimized(false, !minimized, Some(&report)), minimized);
+            assert!(start_minimized(true, false, Some(&report)));
+        }
+        for invalid in ["{}", "invalid", r#"{"minimized":"false"}"#] {
+            std::fs::write(&state, invalid).unwrap();
+            assert_eq!(restart_minimized(&report), None);
+        }
+        std::fs::remove_file(&state).unwrap();
+        assert_eq!(restart_minimized(&report), None);
+        assert!(start_minimized(false, true, Some(&report)));
+        assert!(!start_minimized(false, false, None));
+        std::fs::remove_dir(&root).unwrap();
     }
 }
