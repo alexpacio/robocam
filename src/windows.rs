@@ -1,0 +1,2825 @@
+//! Native Win32 UI and input boundary. The camera never injects input itself.
+#![allow(unsafe_op_in_unsafe_fn)]
+
+mod drawing;
+mod messages;
+
+use crate::updates::{self, UpdateResult};
+use crate::{
+    engine::*,
+    settings::{Profile, Settings},
+    vision::*,
+};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    ffi::c_void,
+    mem::{size_of, zeroed},
+    ptr::{null, null_mut},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::Receiver,
+    },
+    time::Instant,
+};
+use windows_sys::Win32::{
+    Foundation::*,
+    Graphics::Gdi::*,
+    System::{
+        Diagnostics::Debug::MessageBeep, LibraryLoader::*, SystemInformation::*, Threading::*,
+    },
+    UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+};
+
+const APP_CLASS: &str = "robocam.window";
+const TRAY_MESSAGE: u32 = WM_APP + 1;
+const DEFERRED_DPI: u32 = WM_APP + 2;
+const DEFERRED_REDRAW: u32 = WM_APP + 5;
+const APPBAR_CALLBACK: u32 = WM_APP + 3;
+const APPBAR_REPOSITION: u32 = WM_APP + 4;
+const ENABLE: u16 = 101;
+const OPTIONS: u16 = 102;
+const KEYBOARD: u16 = 103;
+const WIZARD: u16 = 104;
+const BAR: u16 = 105;
+const HELP: u16 = 106;
+const QUIT: u16 = 107;
+const PREVIEW: u16 = 110;
+const STATUS: u16 = 111;
+const SAVE: u16 = 310;
+const CANCEL: u16 = 311;
+const PAGE: u16 = 312;
+const PROFILE: u16 = 313;
+const ADD_PROFILE: u16 = 314;
+const DELETE_PROFILE: u16 = 315;
+const NEXT: u16 = 320;
+const CAMERA_SETTINGS: u16 = 321;
+const RESET: u16 = 322;
+const UPDATES: u16 = 323;
+const INPUT_TAG: usize = 0x524F424F;
+const SS_OWNERDRAW: u32 = 13;
+const SS_NOTIFY: u32 = 0x100;
+const SS_LEFT: u32 = 0;
+static PHYSICAL_INPUT: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
+    static MAIN_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
+    static FEEDBACK_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
+    static APPBAR_WINDOW: Cell<HWND> = const { Cell::new(null_mut()) };
+    static APPBAR_POSITIONING: Cell<bool> = const { Cell::new(false) };
+    static APPBAR_PENDING: Cell<bool> = const { Cell::new(false) };
+    static APPBAR_RECT: Cell<Option<(u32,[i32;4])>> = const { Cell::new(None) };
+    static APPBAR_FULLSCREEN: Cell<bool> = const { Cell::new(false) };
+    static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+}
+struct CallbackGuard;
+impl CallbackGuard {
+    fn enter() -> Option<Self> {
+        IN_CALLBACK.with(|busy| if busy.replace(true) { None } else { Some(Self) })
+    }
+}
+impl Drop for CallbackGuard {
+    fn drop(&mut self) {
+        IN_CALLBACK.with(|busy| busy.set(false));
+    }
+}
+
+const BAR_ACTIONS: [(u16, &str, ClickAction); 8] = [
+    (201, "No click", ClickAction::NoClick),
+    (202, "Left click", ClickAction::Left),
+    (203, "Middle click", ClickAction::Middle),
+    (204, "Right click", ClickAction::Right),
+    (205, "Double click", ClickAction::Double),
+    (206, "Triple click", ClickAction::Triple),
+    (207, "Drag", ClickAction::Drag),
+    (208, "Scroll", ClickAction::Scroll),
+];
+
+fn wide(s: &str) -> Vec<u16> {
+    crate::i18n::translate(s)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect()
+}
+fn wide_raw(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    r as u32 | ((g as u32) << 8) | ((b as u32) << 16)
+}
+fn now() -> u64 {
+    unsafe { GetTickCount64() }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BarVisualState {
+    selected: ClickAction,
+    locked: ClickAction,
+    drag: bool,
+    scroll: bool,
+    enabled: bool,
+    held: Option<MouseButton>,
+}
+
+struct App {
+    hwnd: HWND,
+    bar: HWND,
+    options: HWND,
+    wizard: HWND,
+    feedback: HWND,
+    font: HFONT,
+    icon: HICON,
+    mouse_hook: HHOOK,
+    config: Settings,
+    motion: MotionEngine,
+    click: ClickEngine,
+    camera: Option<VisionWorker>,
+    frame: Option<VisionFrame>,
+    last_frame: u64,
+    enabled: bool,
+    status: String,
+    last_status: String,
+    controls: Vec<(HWND, u8)>,
+    options_page: u8,
+    hover_id: u16,
+    hover_since: u64,
+    hover_done: bool,
+    manual_start: Option<(i32, i32)>,
+    wizard_step: u8,
+    calibration_started: u64,
+    calibration_x: f32,
+    calibration_y: f32,
+    calibration_position: (f32, f32),
+    calibration_min: (f32, f32),
+    calibration_max: (f32, f32),
+    injected: [bool; 3],
+    dry_run: bool,
+    smoke_started: Instant,
+    was_controlling: bool,
+    pending_input: VecDeque<(u64, MouseButton, bool)>,
+    update_receiver: Option<Receiver<UpdateResult>>,
+    manual_update: bool,
+    available_release: Option<(String, String)>,
+    tooltip_text: Vec<Vec<u16>>,
+    auto_close: bool,
+    camera_fitted: bool,
+    window_dpi: Vec<(HWND, u32)>,
+    dpi_fonts: Vec<(u32, HFONT)>,
+    logical_children: Vec<(HWND, HWND, [i32; 4])>,
+    bar_size: [i32; 2],
+    bar_visual_state: Option<BarVisualState>,
+}
+
+pub fn run() {
+    unsafe {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|s| s == "--version") {
+            return;
+        }
+        let auto_close = args.iter().any(|s| s == "--smoke-test");
+        let dry_run = auto_close || args.iter().any(|s| s == "--ui-test");
+        let single = CreateMutexW(null(), 0, wide("Local\\robocam.SingleInstance").as_ptr());
+        if GetLastError() == ERROR_ALREADY_EXISTS && !dry_run {
+            let previous = FindWindowW(wide(APP_CLASS).as_ptr(), wide("robocam").as_ptr());
+            if !previous.is_null() {
+                ShowWindow(previous, SW_RESTORE);
+                SetForegroundWindow(previous);
+            }
+            CloseHandle(single);
+            return;
+        }
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        TASKBAR_CREATED.with(|message| {
+            message.set(RegisterWindowMessageW(wide_raw("TaskbarCreated").as_ptr()))
+        });
+        InitCommonControls();
+        let instance = GetModuleHandleW(null());
+        // MAKEINTRESOURCEW(1): this value is a resource identifier, not memory.
+        #[allow(clippy::manual_dangling_ptr)]
+        let icon = LoadIconW(instance, 1usize as *const u16);
+        let icon = if icon.is_null() {
+            LoadIconW(null_mut(), IDI_APPLICATION)
+        } else {
+            icon
+        };
+        let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+            lpfnWndProc: Some(window_proc),
+            hInstance: instance,
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hIcon: icon,
+            hbrBackground: (COLOR_BTNFACE + 1) as HBRUSH,
+            ..zeroed()
+        };
+        // Keep the class name alive for RegisterClassW.
+        let class_name = wide(APP_CLASS);
+        let class = WNDCLASSW {
+            lpszClassName: class_name.as_ptr(),
+            ..class
+        };
+        if RegisterClassW(&class) == 0 {
+            message(null_mut(), "Could not register the robocam window.");
+            return;
+        }
+        let (config, warning) = Settings::load();
+        crate::i18n::set_language(&config.language);
+        let font = CreateFontW(
+            -14,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            wide("Segoe UI").as_ptr(),
+        );
+        let mut app = Box::new(App {
+            hwnd: null_mut(),
+            bar: null_mut(),
+            options: null_mut(),
+            wizard: null_mut(),
+            feedback: null_mut(),
+            font,
+            icon,
+            mouse_hook: null_mut(),
+            config,
+            motion: MotionEngine::default(),
+            click: ClickEngine::default(),
+            camera: None,
+            frame: None,
+            last_frame: 0,
+            enabled: false,
+            status: "Starting camera…".into(),
+            last_status: String::new(),
+            controls: Vec::new(),
+            options_page: 0,
+            hover_id: 0,
+            hover_since: 0,
+            hover_done: false,
+            manual_start: None,
+            wizard_step: 0,
+            calibration_started: 0,
+            calibration_x: 0.0,
+            calibration_y: 0.0,
+            calibration_position: (0.0, 0.0),
+            calibration_min: (0.0, 0.0),
+            calibration_max: (0.0, 0.0),
+            injected: [false; 3],
+            dry_run,
+            smoke_started: Instant::now(),
+            was_controlling: false,
+            pending_input: VecDeque::new(),
+            update_receiver: None,
+            manual_update: false,
+            available_release: None,
+            tooltip_text: Vec::new(),
+            auto_close,
+            camera_fitted: false,
+            window_dpi: Vec::new(),
+            dpi_fonts: vec![(96, font)],
+            logical_children: Vec::new(),
+            bar_size: [561, 52],
+            bar_visual_state: None,
+        });
+        let pointer = &mut *app as *mut App as *const c_void;
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            wide("robocam").as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            scale(300, GetDpiForSystem()),
+            scale(300, GetDpiForSystem()),
+            null_mut(),
+            null_mut(),
+            instance,
+            pointer,
+        );
+        if hwnd.is_null() {
+            message(null_mut(), "Could not create the robocam window.");
+            return;
+        }
+        app.hwnd = hwnd;
+        MAIN_WINDOW.with(|window| window.set(hwnd));
+        let setup_guard = CallbackGuard::enter().unwrap();
+        app.prepare_window(hwnd, 300, 300);
+        app.create_main();
+        app.create_bar();
+        app.feedback = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            class_name.as_ptr(),
+            wide("robocam dwell").as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            scale(52, app.dpi_for(hwnd)),
+            scale(10, app.dpi_for(hwnd)),
+            hwnd,
+            null_mut(),
+            instance,
+            pointer,
+        );
+        FEEDBACK_WINDOW.with(|window| window.set(app.feedback));
+        app.prepare_window(app.feedback, 52, 10);
+        app.register_hotkeys();
+        if !dry_run {
+            app.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0);
+        }
+        app.tray(NIM_ADD);
+        app.enabled = app.config.enabled_at_startup && !dry_run;
+        if !dry_run {
+            app.start_camera();
+        }
+        if app.config.check_updates && !dry_run {
+            app.update_receiver = Some(updates::check_for_updates(env!("CARGO_PKG_VERSION")));
+        }
+        let minimized = args.iter().any(|s| s == "--minimized") || app.config.minimized_at_startup;
+        ShowWindow(
+            hwnd,
+            if minimized && !dry_run {
+                SW_HIDE
+            } else {
+                SW_SHOW
+            },
+        );
+        SetTimer(hwnd, 1, 15, None);
+        if dry_run {
+            app.open_options();
+        }
+        if dry_run && !auto_close {
+            // Override a launcher's inherited hidden STARTUPINFO after the
+            // first ShowWindow call has consumed it.
+            ShowWindow(hwnd, SW_RESTORE);
+            ShowWindow(app.options, SW_RESTORE);
+            SetForegroundWindow(app.options);
+        }
+        if !app.config.wizard_completed && !minimized && !dry_run {
+            app.open_wizard();
+        }
+        if let Some(warning) = warning {
+            message(hwnd, &warning);
+        }
+        drop(setup_guard);
+        let mut msg: MSG = zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if messages::route(&msg) {
+                continue;
+            }
+            if (!app.options.is_null() && IsDialogMessageW(app.options, &msg) != 0)
+                || (!app.wizard.is_null() && IsDialogMessageW(app.wizard, &msg) != 0)
+            {
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let _cleanup_guard = CallbackGuard::enter();
+        remove_appbar(app.bar);
+        app.release_all();
+        if let Some(camera) = app.camera.take() {
+            camera.stop();
+        }
+        app.tray(NIM_DELETE);
+        if !app.mouse_hook.is_null() {
+            UnhookWindowsHookEx(app.mouse_hook);
+        }
+        for id in 1..=7 {
+            UnregisterHotKey(hwnd, id);
+        }
+        for (_, font) in app.dpi_fonts.drain(..) {
+            DeleteObject(font);
+        }
+        CloseHandle(single);
+        if dry_run
+            && let Some(arg) = args.iter().position(|s| s == "--smoke-report")
+            && let Some(path) = args.get(arg + 1)
+        {
+            let _ = std::fs::write(
+                path,
+                "robocam: native windows, options, click bar, timer, clean shutdown OK\n",
+            );
+        }
+    }
+}
+
+unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let data = &*(lparam as *const MSLLHOOKSTRUCT);
+        if data.flags & LLMHF_INJECTED == 0 && data.dwExtraInfo != INPUT_TAG {
+            PHYSICAL_INPUT.store(now(), Ordering::Relaxed);
+        }
+    }
+    CallNextHookEx(null_mut(), code, wparam, lparam)
+}
+
+unsafe fn message(hwnd: HWND, text: &str) {
+    messages::show(hwnd, text);
+}
+
+unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == DEFERRED_REDRAW {
+        let child = wp as HWND;
+        if IsWindow(child) != 0 {
+            InvalidateRect(child, null(), 0);
+        }
+        return 0;
+    }
+    if msg == WM_NCCREATE {
+        let create = &*(lp as *const CREATESTRUCTW);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+    }
+    // Native parent painting synchronously sends WM_DRAWITEM for owner-drawn
+    // children. Do not hold an App borrow/guard while DefWindowProc performs
+    // that work: otherwise every child draw is deferred and briefly blank.
+    // Only the small dwell-feedback window paints directly from App state.
+    if msg == WM_PAINT && !FEEDBACK_WINDOW.with(|window| window.get() == hwnd) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    // Shell notifications may arrive synchronously during registration and
+    // resize. These helpers use only thread-local handles, never borrow App.
+    if matches!(msg, WM_DESTROY | WM_NCDESTROY) {
+        remove_appbar(hwnd);
+        if FEEDBACK_WINDOW.with(|window| window.get() == hwnd) {
+            FEEDBACK_WINDOW.with(|window| window.set(null_mut()));
+        }
+    }
+    if TASKBAR_CREATED.with(|message| message.get() != 0 && message.get() == msg)
+        && MAIN_WINDOW.with(|window| window.get() == hwnd)
+    {
+        APPBAR_WINDOW.with(|window| window.set(null_mut()));
+        APPBAR_RECT.with(|rectangle| rectangle.set(None));
+        queue_appbar_position();
+        return 0;
+    }
+    if matches!(msg, WM_DISPLAYCHANGE | WM_SETTINGCHANGE)
+        && MAIN_WINDOW.with(|window| window.get() == hwnd)
+    {
+        queue_appbar_position();
+    }
+    if APPBAR_WINDOW.with(|window| window.get() == hwnd) {
+        if msg == APPBAR_CALLBACK && matches!(wp as u32, ABN_POSCHANGED | ABN_STATECHANGE) {
+            queue_appbar_position();
+            return 0;
+        }
+        if msg == WM_WINDOWPOSCHANGED || msg == WM_ACTIVATE {
+            let mut data = appbar_data(hwnd);
+            SHAppBarMessage(
+                if msg == WM_ACTIVATE {
+                    ABM_ACTIVATE
+                } else {
+                    ABM_WINDOWPOSCHANGED
+                },
+                &mut data,
+            );
+        }
+    }
+    // Default processing may run a nested native menu loop. It must run without
+    // a borrowed App so timer-driven head control continues inside those menus.
+    if msg == TRAY_MESSAGE && lp as u32 == WM_RBUTTONUP {
+        App::tray_menu(hwnd);
+        return 0;
+    }
+    if !matches!(
+        msg,
+        WM_COMMAND
+            | WM_TIMER
+            | WM_HOTKEY
+            | WM_DRAWITEM
+            | WM_PAINT
+            | WM_SIZE
+            | WM_GETMINMAXINFO
+            | WM_DPICHANGED
+            | DEFERRED_DPI
+            | APPBAR_CALLBACK
+            | APPBAR_REPOSITION
+            | WM_NCDESTROY
+            | WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_NCHITTEST
+            | WM_CLOSE
+            | WM_QUERYENDSESSION
+            | WM_ENDSESSION
+            | WM_DESTROY
+            | TRAY_MESSAGE
+    ) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+    if ptr.is_null() {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    // Win32 synchronously sends notifications during resize, paint and destroy.
+    // Never create an aliasing &mut App in such a nested callback.
+    let Some(_guard) = CallbackGuard::enter() else {
+        match msg {
+            WM_DPICHANGED => {
+                let rect = Box::new(*(lp as *const RECT));
+                let pointer = Box::into_raw(rect);
+                if PostMessageW(hwnd, DEFERRED_DPI, wp, pointer as isize) == 0 {
+                    drop(Box::from_raw(pointer));
+                }
+                return 0;
+            }
+            WM_SIZE | WM_COMMAND | WM_HOTKEY | WM_CLOSE | DEFERRED_DPI | APPBAR_CALLBACK
+            | APPBAR_REPOSITION => {
+                PostMessageW(hwnd, msg, wp, lp);
+                return 0;
+            }
+            WM_DRAWITEM => {
+                // Invalidation inside an in-progress WM_PAINT can be consumed
+                // by EndPaint. Schedule it after the synchronous paint returns.
+                PostMessageW(
+                    hwnd,
+                    DEFERRED_REDRAW,
+                    (*(lp as *const DRAWITEMSTRUCT)).hwndItem as usize,
+                    0,
+                );
+                return 0;
+            }
+            WM_DESTROY if MAIN_WINDOW.with(|main| main.get() == hwnd) => {
+                PostQuitMessage(0);
+                return 0;
+            }
+            WM_TIMER => return 0,
+            _ => return DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    };
+    let app = &mut *ptr;
+    match msg {
+        APPBAR_REPOSITION => {
+            APPBAR_PENDING.with(|pending| pending.set(false));
+            app.position_bar();
+            0
+        }
+        APPBAR_CALLBACK if hwnd == app.bar => {
+            match wp as u32 {
+                ABN_FULLSCREENAPP => {
+                    APPBAR_FULLSCREEN.with(|fullscreen| fullscreen.set(lp != 0));
+                    SetWindowPos(
+                        hwnd,
+                        if lp != 0 { HWND_BOTTOM } else { HWND_TOPMOST },
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+                ABN_WINDOWARRANGE => {
+                    if lp != 0 {
+                        ShowWindow(hwnd, SW_HIDE);
+                    } else if app.config.profile().show_bar {
+                        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    }
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_COMMAND => {
+            app.command(hwnd, (wp & 0xffff) as u16, ((wp >> 16) & 0xffff) as u16);
+            0
+        }
+        WM_TIMER if hwnd == app.hwnd => {
+            app.tick();
+            0
+        }
+        WM_HOTKEY => {
+            match wp {
+                1 => app.toggle(),
+                2 => {
+                    app.release_all();
+                    app.move_cursor(screen_center());
+                    app.motion.reset();
+                }
+                3 => {
+                    app.config.profile_mut().motion.restricted_workspace =
+                        !app.config.profile().motion.restricted_workspace;
+                    app.save();
+                }
+                4..=7 => {
+                    let m = &mut app.config.profile_mut().motion;
+                    match wp {
+                        4 => m.speed_x = m.speed_x.saturating_sub(1),
+                        5 => m.speed_x = (m.speed_x + 1).min(30),
+                        6 => m.speed_y = (m.speed_y + 1).min(30),
+                        _ => m.speed_y = m.speed_y.saturating_sub(1),
+                    }
+                    app.save();
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_DRAWITEM => {
+            app.draw_item(&*(lp as *const DRAWITEMSTRUCT));
+            1
+        }
+        WM_PAINT if hwnd == app.feedback => {
+            app.draw_feedback();
+            0
+        }
+        WM_SIZE if hwnd == app.hwnd => {
+            app.layout_main();
+            0
+        }
+        WM_GETMINMAXINFO if hwnd == app.hwnd => {
+            let limits = &mut *(lp as *mut MINMAXINFO);
+            let dpi = app.dpi_for(hwnd);
+            limits.ptMinTrackSize = POINT {
+                x: scale(300, dpi),
+                y: scale(300, dpi),
+            };
+            0
+        }
+        WM_DPICHANGED => {
+            app.change_dpi(hwnd, (wp & 0xffff) as u32, &*(lp as *const RECT));
+            0
+        }
+        DEFERRED_DPI => {
+            let rectangle = Box::from_raw(lp as *mut RECT);
+            app.change_dpi(hwnd, (wp & 0xffff) as u32, &rectangle);
+            0
+        }
+        WM_NCDESTROY => {
+            app.window_dpi.retain(|(window, _)| *window != hwnd);
+            app.logical_children
+                .retain(|(_, parent, _)| *parent != hwnd);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_LBUTTONDOWN if hwnd == app.hwnd => {
+            let p = point_from_lp(lp);
+            app.manual_start = Some(p);
+            SetCapture(hwnd);
+            0
+        }
+        WM_LBUTTONUP if hwnd == app.hwnd => {
+            app.finish_manual_roi(point_from_lp(lp));
+            ReleaseCapture();
+            0
+        }
+        WM_NCHITTEST if hwnd == app.bar && app.config.profile().bar_position == 4 => {
+            let hit = DefWindowProcW(hwnd, msg, wp, lp);
+            if hit == HTCLIENT as isize {
+                HTCAPTION as isize
+            } else {
+                hit
+            }
+        }
+        WM_CLOSE => {
+            if hwnd == app.hwnd {
+                ShowWindow(hwnd, SW_HIDE);
+            } else if hwnd == app.options {
+                app.destroy_owned(hwnd);
+                app.options = null_mut();
+                app.controls.clear();
+            } else if hwnd == app.wizard {
+                app.calibration_started = 0;
+                app.destroy_owned(hwnd);
+                app.wizard = null_mut();
+            } else if hwnd == app.bar {
+                app.config.profile_mut().show_bar = false;
+                remove_appbar(hwnd);
+                ShowWindow(hwnd, SW_HIDE);
+                app.save();
+            }
+            0
+        }
+        WM_QUERYENDSESSION => {
+            app.release_all();
+            1
+        }
+        WM_ENDSESSION if wp != 0 => {
+            remove_appbar(app.bar);
+            app.release_all();
+            PostQuitMessage(0);
+            0
+        }
+        WM_DESTROY if hwnd == app.hwnd => {
+            remove_appbar(app.bar);
+            app.release_all();
+            PostQuitMessage(0);
+            0
+        }
+        TRAY_MESSAGE => {
+            if lp as u32 == WM_LBUTTONUP || lp as u32 == WM_LBUTTONDBLCLK {
+                ShowWindow(app.hwnd, SW_RESTORE);
+                SetForegroundWindow(app.hwnd);
+            }
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+fn point_from_lp(lp: LPARAM) -> (i32, i32) {
+    ((lp as u16 as i16) as i32, ((lp >> 16) as u16 as i16) as i32)
+}
+unsafe fn cursor() -> (i32, i32) {
+    let mut p: POINT = zeroed();
+    GetCursorPos(&mut p);
+    (p.x, p.y)
+}
+unsafe fn screen() -> ScreenRect {
+    ScreenRect {
+        left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+        top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+        width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    }
+}
+unsafe fn screen_center() -> (i32, i32) {
+    let s = screen();
+    (s.left + s.width / 2, s.top + s.height / 2)
+}
+unsafe fn text(hwnd: HWND) -> String {
+    let mut buffer = vec![0u16; GetWindowTextLengthW(hwnd) as usize + 1];
+    let n = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+    String::from_utf16_lossy(&buffer[..n as usize])
+}
+unsafe fn set_text(hwnd: HWND, value: &str) {
+    SetWindowTextW(hwnd, wide(value).as_ptr());
+}
+unsafe fn set_text_raw(hwnd: HWND, value: &str) {
+    SetWindowTextW(hwnd, wide_raw(value).as_ptr());
+}
+fn scale(value: i32, dpi: u32) -> i32 {
+    ((i64::from(value) * i64::from(dpi.max(1)) + 48) / 96) as i32
+}
+
+unsafe fn appbar_data(hwnd: HWND) -> APPBARDATA {
+    APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd,
+        ..zeroed()
+    }
+}
+
+unsafe fn queue_appbar_position() {
+    if APPBAR_POSITIONING.with(Cell::get) || APPBAR_PENDING.with(|pending| pending.replace(true)) {
+        return;
+    }
+    let main = MAIN_WINDOW.with(Cell::get);
+    if main.is_null() || PostMessageW(main, APPBAR_REPOSITION, 0, 0) == 0 {
+        APPBAR_PENDING.with(|pending| pending.set(false));
+    }
+}
+
+unsafe fn remove_appbar(hwnd: HWND) {
+    if hwnd.is_null() || !APPBAR_WINDOW.with(|window| window.get() == hwnd) {
+        return;
+    }
+    APPBAR_WINDOW.with(|window| window.set(null_mut()));
+    APPBAR_RECT.with(|rectangle| rectangle.set(None));
+    APPBAR_FULLSCREEN.with(|fullscreen| fullscreen.set(false));
+    let previous = APPBAR_POSITIONING.with(|busy| busy.replace(true));
+    let mut data = appbar_data(hwnd);
+    SHAppBarMessage(ABM_REMOVE, &mut data);
+    APPBAR_POSITIONING.with(|busy| busy.set(previous));
+}
+
+struct AppbarPositionGuard(bool);
+impl AppbarPositionGuard {
+    fn enter() -> Self {
+        Self(APPBAR_POSITIONING.with(|busy| busy.replace(true)))
+    }
+}
+impl Drop for AppbarPositionGuard {
+    fn drop(&mut self) {
+        APPBAR_POSITIONING.with(|busy| busy.set(self.0));
+    }
+}
+
+impl App {
+    unsafe fn destroy_owned(&mut self, hwnd: HWND) {
+        remove_appbar(if hwnd == self.hwnd { self.bar } else { hwnd });
+        self.window_dpi.retain(|(window, _)| *window != hwnd);
+        self.logical_children
+            .retain(|(_, parent, _)| *parent != hwnd);
+        DestroyWindow(hwnd);
+    }
+    unsafe fn dpi_for(&self, hwnd: HWND) -> u32 {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        self.window_dpi
+            .iter()
+            .find(|(window, _)| *window == root)
+            .map(|(_, dpi)| *dpi)
+            .unwrap_or_else(|| GetDpiForWindow(hwnd).max(96))
+    }
+
+    unsafe fn font_for(&self, hwnd: HWND) -> HFONT {
+        let dpi = self.dpi_for(hwnd);
+        self.dpi_fonts
+            .iter()
+            .find(|(value, _)| *value == dpi)
+            .map(|(_, font)| *font)
+            .unwrap_or(self.font)
+    }
+
+    unsafe fn remember_dpi(&mut self, hwnd: HWND, dpi: u32) {
+        let dpi = dpi.max(96);
+        if let Some((_, value)) = self
+            .window_dpi
+            .iter_mut()
+            .find(|(window, _)| *window == hwnd)
+        {
+            *value = dpi;
+        } else {
+            self.window_dpi.push((hwnd, dpi));
+        }
+        if !self.dpi_fonts.iter().any(|(value, _)| *value == dpi) {
+            let font = CreateFontW(
+                -scale(14, dpi),
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_DEFAULT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                CLEARTYPE_QUALITY as u32,
+                DEFAULT_PITCH as u32,
+                wide("Segoe UI").as_ptr(),
+            );
+            if !font.is_null() {
+                self.dpi_fonts.push((dpi, font));
+            }
+        }
+    }
+
+    unsafe fn prepare_window(&mut self, hwnd: HWND, width: i32, height: i32) {
+        if hwnd.is_null() {
+            return;
+        }
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        self.remember_dpi(hwnd, dpi);
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            scale(width, dpi),
+            scale(height, dpi),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
+    unsafe fn fit_camera_window(&mut self, width: i32, height: i32) {
+        if self.camera_fitted {
+            return;
+        }
+        self.camera_fitted = true;
+        let dpi = self.dpi_for(self.hwnd);
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: scale(width.max(300), dpi),
+            bottom: scale(height + 78, dpi),
+        };
+        AdjustWindowRectExForDpi(
+            &mut bounds,
+            GetWindowLongW(self.hwnd, GWL_STYLE) as u32,
+            1,
+            GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32,
+            dpi,
+        );
+        SetWindowPos(
+            self.hwnd,
+            null_mut(),
+            0,
+            0,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+
+    unsafe fn change_dpi(&mut self, hwnd: HWND, dpi: u32, suggested: &RECT) {
+        let dpi = dpi.max(96);
+        self.remember_dpi(hwnd, dpi);
+        let font = self.font_for(hwnd);
+        // Store original logical bounds rather than repeatedly scaling rounded
+        // pixels. Combo boxes retain their intended dropdown heights as well.
+        for &(child, parent, [x, y, w, h]) in &self.logical_children {
+            if parent == hwnd && IsWindow(child) != 0 {
+                SendMessageW(child, WM_SETFONT, font as usize, 0);
+                SetWindowPos(
+                    child,
+                    null_mut(),
+                    scale(x, dpi),
+                    scale(y, dpi),
+                    scale(w, dpi),
+                    scale(h, dpi),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            suggested.left,
+            suggested.top,
+            suggested.right - suggested.left,
+            suggested.bottom - suggested.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        if hwnd == self.hwnd {
+            self.layout_main();
+        }
+        if hwnd == self.bar && self.config.profile().bar_position != 4 {
+            self.position_bar();
+        }
+        self.manual_start = None;
+        RedrawWindow(
+            hwnd,
+            null(),
+            null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
+    }
+
+    unsafe fn child(
+        &mut self,
+        parent: HWND,
+        class: &str,
+        title: &str,
+        id: u16,
+        style: u32,
+        rect: [i32; 4],
+    ) -> HWND {
+        let dpi = self.dpi_for(parent);
+        let [x, y, w, h] = rect.map(|value| scale(value, dpi));
+        let title = if class == "EDIT" || class == "COMBOBOX" {
+            wide_raw(title)
+        } else {
+            wide(title)
+        };
+        let hwnd = CreateWindowExW(
+            0,
+            wide_raw(class).as_ptr(),
+            title.as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style,
+            x,
+            y,
+            w,
+            h,
+            parent,
+            id as usize as HMENU,
+            GetModuleHandleW(null()),
+            null(),
+        );
+        self.logical_children.push((hwnd, parent, rect));
+        SendMessageW(hwnd, WM_SETFONT, self.font_for(parent) as usize, 1);
+        hwnd
+    }
+
+    unsafe fn create_main(&mut self) {
+        let menu = CreateMenu();
+        let file = CreatePopupMenu();
+        let tools = CreatePopupMenu();
+        for (id, label) in [
+            (ENABLE, "Enable / pause\tF11"),
+            (BAR, "Show / hide click bar"),
+            (KEYBOARD, "On-screen keyboard"),
+            (QUIT, "Exit"),
+        ] {
+            AppendMenuW(file, MF_STRING, id as usize, wide(label).as_ptr());
+        }
+        for (id, label) in [
+            (OPTIONS, "Configuration…"),
+            (WIZARD, "Setup and calibration…"),
+            (HELP, "Help and about…"),
+            (UPDATES, "Check for updates…"),
+        ] {
+            AppendMenuW(tools, MF_STRING, id as usize, wide(label).as_ptr());
+        }
+        AppendMenuW(menu, MF_POPUP, file as usize, wide("&File").as_ptr());
+        AppendMenuW(menu, MF_POPUP, tools as usize, wide("&Tools").as_ptr());
+        SetMenu(self.hwnd, menu);
+        for (i, (id, label)) in [
+            (ENABLE, "Enable / pause"),
+            (OPTIONS, "Configuration"),
+            (KEYBOARD, "Keyboard"),
+            (WIZARD, "Setup"),
+            (BAR, "Click bar"),
+            (HELP, "Help"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let button = self.child(
+                self.hwnd,
+                "BUTTON",
+                label,
+                *id,
+                BS_OWNERDRAW as u32 | WS_TABSTOP,
+                [4 + i as i32 * 38, 3, 36, 36],
+            );
+            self.tooltip(self.hwnd, button, label);
+        }
+        // SS_NOTIFY redirects a preview click through WM_COMMAND; manual ROI uses a subclass below.
+        let preview = self.child(
+            self.hwnd,
+            "STATIC",
+            "Camera preview",
+            PREVIEW,
+            SS_OWNERDRAW | SS_NOTIFY,
+            [0, 42, 280, 175],
+        );
+        SetWindowSubclass(preview, Some(preview_proc), 1, self as *mut Self as usize);
+        self.child(
+            self.hwnd,
+            "STATIC",
+            "Starting camera…",
+            STATUS,
+            SS_LEFT,
+            [5, 220, 275, 35],
+        );
+        self.layout_main();
+    }
+
+    unsafe fn layout_main(&self) {
+        if self.hwnd.is_null() {
+            return;
+        }
+        let dpi = self.dpi_for(self.hwnd);
+        let mut r: RECT = zeroed();
+        GetClientRect(self.hwnd, &mut r);
+        MoveWindow(
+            GetDlgItem(self.hwnd, PREVIEW as i32),
+            0,
+            scale(42, dpi),
+            r.right,
+            (r.bottom - scale(78, dpi)).max(scale(40, dpi)),
+            1,
+        );
+        MoveWindow(
+            GetDlgItem(self.hwnd, STATUS as i32),
+            scale(5, dpi),
+            (r.bottom - scale(34, dpi)).max(scale(83, dpi)),
+            r.right - scale(10, dpi),
+            scale(32, dpi),
+            1,
+        );
+    }
+
+    unsafe fn tooltip(&mut self, parent: HWND, target: HWND, label: &str) {
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST,
+            wide("tooltips_class32").as_ptr(),
+            null(),
+            WS_POPUP | TTS_ALWAYSTIP,
+            0,
+            0,
+            0,
+            0,
+            parent,
+            null_mut(),
+            GetModuleHandleW(null()),
+            null(),
+        );
+        self.tooltip_text.push(wide(label));
+        let mut info: TTTOOLINFOW = zeroed();
+        info.cbSize = size_of::<TTTOOLINFOW>() as u32;
+        info.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        info.hwnd = parent;
+        info.uId = target as usize;
+        info.lpszText = self.tooltip_text.last_mut().unwrap().as_mut_ptr();
+        SendMessageW(hwnd, TTM_ADDTOOLW, 0, &info as *const _ as isize);
+    }
+
+    unsafe fn create_bar(&mut self) {
+        self.bar_visual_state = None;
+        if !self.bar.is_null() {
+            self.destroy_owned(self.bar);
+        }
+        let mut main_rect: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut main_rect);
+        self.bar = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            wide(APP_CLASS).as_ptr(),
+            wide("robocam click bar").as_ptr(),
+            WS_POPUP | WS_CLIPCHILDREN,
+            main_rect.left,
+            main_rect.top,
+            scale(561, self.dpi_for(self.hwnd)),
+            scale(52, self.dpi_for(self.hwnd)),
+            self.hwnd,
+            null_mut(),
+            GetModuleHandleW(null()),
+            self as *mut Self as *const c_void,
+        );
+        self.prepare_window(self.bar, 561, 52);
+        let thin = self.config.profile().thin_bar;
+        let vertical = matches!(self.config.profile().bar_position, 2 | 3);
+        let unit = if thin { 30 } else { 52 };
+        let button = if thin { 76 } else { 48 };
+        let logo = if thin { 16 } else { 48 };
+        let gap = if thin { 9 } else { 15 };
+        let leading = if vertical {
+            [2, 0, logo, logo]
+        } else {
+            [0, 2, logo, logo]
+        };
+        let enable = self.child(
+            self.bar,
+            "BUTTON",
+            "Enable / pause",
+            210,
+            BS_OWNERDRAW as u32,
+            leading,
+        );
+        self.tooltip(self.bar, enable, "Enable / pause");
+        let mut offset = logo + gap;
+        for (id, label, _) in BAR_ACTIONS {
+            let rect = if vertical {
+                [2, offset + 2, button, unit - 4]
+            } else {
+                [offset + 2, 2, button, unit - 4]
+            };
+            let control = self.child(
+                self.bar,
+                "BUTTON",
+                label,
+                id,
+                if thin {
+                    BS_PUSHBUTTON as u32
+                } else {
+                    BS_OWNERDRAW as u32
+                },
+                rect,
+            );
+            self.tooltip(self.bar, control, label);
+            offset += if vertical { unit } else { button + 4 };
+            if id == 201 {
+                offset += gap;
+            }
+        }
+        offset += gap;
+        let rect = if vertical {
+            [2, offset + 2, button, unit - 4]
+        } else {
+            [offset + 2, 2, button, unit - 4]
+        };
+        let show = self.child(
+            self.bar,
+            "BUTTON",
+            "Show main window",
+            209,
+            BS_OWNERDRAW as u32,
+            rect,
+        );
+        self.tooltip(self.bar, show, "Show main window");
+        offset += if vertical { unit } else { button + 4 };
+        let (w, h) = if vertical {
+            ((button + 4).max(logo + 4), offset)
+        } else {
+            (offset, unit.max(logo + 4))
+        };
+        self.bar_size = [w, h];
+        self.position_bar();
+        ShowWindow(
+            self.bar,
+            if self.config.profile().show_bar
+                && (self.config.profile().bar_position == 4
+                    || APPBAR_WINDOW.with(|window| window.get() == self.bar))
+            {
+                SW_SHOWNOACTIVATE
+            } else {
+                SW_HIDE
+            },
+        );
+        self.refresh_bar_visuals();
+    }
+
+    unsafe fn refresh_bar_visuals(&mut self) {
+        let state = BarVisualState {
+            selected: self.click.selected(),
+            locked: self.click.locked(),
+            drag: self.click.drag_enabled(),
+            scroll: self.click.scrolling(),
+            enabled: self.enabled,
+            held: self.click.held_button(),
+        };
+        if self.bar_visual_state == Some(state) {
+            return;
+        }
+        self.bar_visual_state = Some(state);
+        if !self.bar.is_null() {
+            for id in 201..=210 {
+                let control = GetDlgItem(self.bar, id);
+                if !control.is_null() {
+                    InvalidateRect(control, null(), 0);
+                }
+            }
+        }
+        for id in [ENABLE, BAR] {
+            let control = GetDlgItem(self.hwnd, id as i32);
+            if !control.is_null() {
+                InvalidateRect(control, null(), 0);
+            }
+        }
+    }
+
+    unsafe fn position_bar(&mut self) {
+        if self.bar.is_null() || IsWindow(self.bar) == 0 {
+            return;
+        }
+        if !self.config.profile().show_bar {
+            remove_appbar(self.bar);
+            ShowWindow(self.bar, SW_HIDE);
+            return;
+        }
+        let _positioning = AppbarPositionGuard::enter();
+        let dpi = self.dpi_for(self.bar);
+        let [w, h] = self.bar_size.map(|value| scale(value, dpi));
+        let mut monitor: MONITORINFO = zeroed();
+        monitor.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(
+            MonitorFromWindow(self.bar, MONITOR_DEFAULTTONEAREST),
+            &mut monitor,
+        );
+        if self.config.profile().bar_position == 4 {
+            remove_appbar(self.bar);
+            let area = monitor.rcWork;
+            SetWindowPos(
+                self.bar,
+                HWND_TOPMOST,
+                area.left + (area.right - area.left - w) / 2,
+                area.top + scale(70, dpi),
+                w,
+                h,
+                SWP_NOACTIVATE,
+            );
+            return;
+        }
+        let edge = match self.config.profile().bar_position {
+            1 => ABE_BOTTOM,
+            2 => ABE_LEFT,
+            3 => ABE_RIGHT,
+            _ => ABE_TOP,
+        };
+        let mut data = appbar_data(self.bar);
+        let registered = APPBAR_WINDOW.with(|window| window.get() == self.bar);
+        if !registered {
+            data.uCallbackMessage = APPBAR_CALLBACK;
+            if SHAppBarMessage(ABM_NEW, &mut data) == 0 {
+                // Never replace workspace reservation with an overlapping
+                // always-on-top fallback when the shell rejects registration.
+                ShowWindow(self.bar, SW_HIDE);
+                self.status = "Windows could not reserve space for the click bar.".into();
+                return;
+            }
+            APPBAR_WINDOW.with(|window| window.set(self.bar));
+            APPBAR_RECT.with(|rectangle| rectangle.set(None));
+        }
+        data.uEdge = edge;
+        // Start from monitor bounds, not rcWork, which already excludes this
+        // bar. Shell negotiation accounts for taskbars and other appbars.
+        data.rc = monitor.rcMonitor;
+        match edge {
+            ABE_BOTTOM => data.rc.top = data.rc.bottom - h,
+            ABE_LEFT => data.rc.right = data.rc.left + w,
+            ABE_RIGHT => data.rc.left = data.rc.right - w,
+            _ => data.rc.bottom = data.rc.top + h,
+        }
+        SHAppBarMessage(ABM_QUERYPOS, &mut data);
+        match edge {
+            ABE_BOTTOM => data.rc.top = data.rc.bottom - h,
+            ABE_LEFT => data.rc.right = data.rc.left + w,
+            ABE_RIGHT => data.rc.left = data.rc.right - w,
+            _ => data.rc.bottom = data.rc.top + h,
+        }
+        let proposed = [data.rc.left, data.rc.top, data.rc.right, data.rc.bottom];
+        // ABM_SETPOS notifies all appbars. Skip unchanged reservations to avoid
+        // feedback loops between independently registered desktop toolbars.
+        if APPBAR_RECT.with(|rectangle| rectangle.get() != Some((edge, proposed))) {
+            SHAppBarMessage(ABM_SETPOS, &mut data);
+            APPBAR_RECT.with(|rectangle| {
+                rectangle.set(Some((
+                    edge,
+                    [data.rc.left, data.rc.top, data.rc.right, data.rc.bottom],
+                )))
+            });
+        }
+        let mut current: RECT = zeroed();
+        GetWindowRect(self.bar, &mut current);
+        if !registered
+            || current.left != data.rc.left
+            || current.top != data.rc.top
+            || current.right != data.rc.right
+            || current.bottom != data.rc.bottom
+        {
+            SetWindowPos(
+                self.bar,
+                if APPBAR_FULLSCREEN.with(Cell::get) {
+                    HWND_BOTTOM
+                } else {
+                    HWND_TOPMOST
+                },
+                data.rc.left,
+                data.rc.top,
+                data.rc.right - data.rc.left,
+                data.rc.bottom - data.rc.top,
+                SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    unsafe fn start_camera(&mut self) {
+        if self.dry_run {
+            return;
+        }
+        self.release_all();
+        self.motion.reset();
+        if let Some(camera) = self.camera.take() {
+            camera.stop();
+        }
+        self.frame = None;
+        self.last_frame = 0;
+        let p = self.config.profile();
+        self.camera = Some(VisionWorker::start(VisionConfig {
+            camera_index: p.camera_index,
+            track_face: p.track_face,
+            face_timeout_ms: p.face_timeout_ms,
+            detection_interval_ms: p.detection_interval_ms,
+            manual_area: p.manual_area,
+        }));
+        self.status = "Opening camera…".into();
+    }
+
+    unsafe fn tick(&mut self) {
+        let time = now();
+        if self.auto_close && self.smoke_started.elapsed().as_secs_f32() > 2.0 {
+            self.destroy_owned(self.hwnd);
+            return;
+        }
+        self.poll_updates();
+        let event = self.camera.as_ref().and_then(|camera| camera.try_recv());
+        let mut displacement = None;
+        if let Some(event) = event {
+            match event {
+                VisionEvent::Frame(frame) => {
+                    if self.frame.is_none() {
+                        self.fit_camera_window(frame.width as i32, frame.height as i32);
+                    }
+                    if frame.captured_at.elapsed().as_millis() < 250 {
+                        displacement = Some((frame.dx, frame.dy));
+                        self.last_frame = time;
+                    }
+                    self.status = if frame.face_detected || !self.config.profile().track_face {
+                        format!(
+                            "{} · {:.0} fps · {} points",
+                            if self.enabled {
+                                "Tracking"
+                            } else {
+                                "Paused · F11 to enable"
+                            },
+                            frame.fps,
+                            frame.tracked_points
+                        )
+                    } else {
+                        "No face — center your face in the camera".into()
+                    };
+                    self.frame = Some(frame);
+                    InvalidateRect(GetDlgItem(self.hwnd, PREVIEW as i32), null(), 0);
+                }
+                VisionEvent::Error(error) => {
+                    self.status = error;
+                    self.release_all();
+                    self.last_frame = 0;
+                    InvalidateRect(GetDlgItem(self.hwnd, PREVIEW as i32), null(), 0);
+                }
+                VisionEvent::Stopped => {
+                    self.release_all();
+                    if self.last_frame != 0 {
+                        self.status = "Camera stopped. Open Configuration to restart it.".into();
+                    }
+                    self.last_frame = 0;
+                    InvalidateRect(GetDlgItem(self.hwnd, PREVIEW as i32), null(), 0);
+                }
+            }
+        }
+        let physical = PHYSICAL_INPUT.load(Ordering::Relaxed);
+        let paused_by_mouse =
+            physical > 0 && time.saturating_sub(physical) < self.config.profile().pause_on_mouse_ms;
+        let tracking = self.last_frame != 0
+            && time.saturating_sub(self.last_frame) < 500
+            && self.frame.as_ref().is_some_and(|f| f.tracking_valid);
+        if self.enabled && tracking && !paused_by_mouse {
+            while self
+                .pending_input
+                .front()
+                .is_some_and(|(due, _, _)| *due <= time)
+            {
+                let (_, button, down) = self.pending_input.pop_front().unwrap();
+                self.button(button, down);
+            }
+        } else if self.was_controlling || !self.pending_input.is_empty() {
+            self.release_all();
+        }
+        let mut position = cursor();
+        let mut over_bar = self.inside_window(self.bar, position);
+        if let Some((dx, dy)) = displacement {
+            if self.calibration_started > 0 {
+                self.calibrate_frame(dx, dy, tracking);
+            }
+            if self.enabled && tracking && !paused_by_mouse && self.calibration_started == 0 {
+                self.was_controlling = true;
+                let movement =
+                    self.motion
+                        .process(dx, dy, position, screen(), &self.config.profile().motion);
+                if !self.click.scrolling() && self.pending_input.is_empty() {
+                    self.move_cursor(movement.position);
+                    position = movement.position;
+                }
+                over_bar = self.inside_window(self.bar, position);
+                let bar_control = self.bar_control_at(position);
+                if bar_control != self.hover_id
+                    || movement.delta.0.abs().max(movement.delta.1.abs())
+                        > self.config.profile().click.tolerance_px as i32
+                {
+                    self.hover_id = bar_control;
+                    self.hover_since = time;
+                    self.hover_done = false;
+                }
+                if over_bar {
+                    self.click.suspend_dwell();
+                    if self.config.profile().fast_bar
+                        && let Some((_, _, action)) =
+                            BAR_ACTIONS.iter().find(|(id, _, _)| *id == bar_control)
+                    {
+                        self.click.hover(*action, true);
+                    }
+                    if bar_control != 0
+                        && !self.hover_done
+                        && time.saturating_sub(self.hover_since)
+                            >= self.config.profile().click.dwell_ms
+                    {
+                        self.hover_done = true;
+                        self.command(self.bar, bar_control, 0);
+                    }
+                } else if self.pending_input.is_empty() {
+                    let delta = if self.click.scrolling() {
+                        movement.unclamped_delta
+                    } else {
+                        movement.delta
+                    };
+                    let events = self.click.update(
+                        time,
+                        delta,
+                        position,
+                        true,
+                        true,
+                        false,
+                        &self.config.profile().click,
+                    );
+                    self.dispatch(events);
+                }
+            } else {
+                self.motion.reset();
+                self.hover_since = time;
+                self.hover_done = false;
+                if self.was_controlling {
+                    self.release_all();
+                }
+            }
+        } else if !tracking || !self.enabled || paused_by_mouse {
+            if self.was_controlling {
+                self.release_all();
+            }
+            self.motion.reset();
+            self.hover_since = time;
+            self.hover_done = false;
+        }
+        if paused_by_mouse && self.enabled && tracking {
+            self.status = "Physical mouse in use — head control paused".into();
+        }
+        if self.status != self.last_status {
+            set_text(GetDlgItem(self.hwnd, STATUS as i32), &self.status);
+            self.last_status = self.status.clone();
+        }
+        let progress = self.click.progress();
+        if self.config.profile().visual_feedback
+            && progress > 0.0
+            && self.enabled
+            && tracking
+            && !over_bar
+        {
+            let dpi = self.dpi_for(self.feedback);
+            SetWindowPos(
+                self.feedback,
+                HWND_TOPMOST,
+                position.0 + scale(18, dpi),
+                position.1 + scale(22, dpi),
+                scale(52, dpi),
+                scale(10, dpi),
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            InvalidateRect(self.feedback, null(), 0);
+        } else {
+            ShowWindow(self.feedback, SW_HIDE);
+        }
+        self.auto_hide_bar(position);
+        self.refresh_bar_visuals();
+    }
+
+    unsafe fn dispatch(&mut self, events: Vec<InputEvent>) {
+        for event in events {
+            match event {
+                InputEvent::MoveTo(x, y) => self.move_cursor((x, y)),
+                InputEvent::Click(button, count) => {
+                    let spacing =
+                        self.config
+                            .profile()
+                            .event_delay_ms
+                            .max(if count > 1 { 20 } else { 0 });
+                    let time = now();
+                    for i in 0..count {
+                        self.pending_input
+                            .push_back((time + 2 * i as u64 * spacing, button, true));
+                        self.pending_input.push_back((
+                            time + (2 * i as u64 + 1) * spacing,
+                            button,
+                            false,
+                        ));
+                    }
+                    if self.config.profile().click_sound {
+                        MessageBeep(0xFFFF_FFFF);
+                    }
+                }
+                InputEvent::ButtonDown(button) => self.button(button, true),
+                InputEvent::ButtonUp(button) => self.button(button, false),
+                InputEvent::Scroll(x, y) => {
+                    if y != 0 {
+                        self.inject(MOUSEEVENTF_WHEEL, 0, 0, y as u32);
+                    }
+                    if x != 0 {
+                        self.inject(MOUSEEVENTF_HWHEEL, 0, 0, x as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe fn inject(&self, flags: u32, dx: i32, dy: i32, data: u32) {
+        if self.dry_run {
+            return;
+        }
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: data,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: INPUT_TAG,
+                },
+            },
+        };
+        SendInput(1, &input, size_of::<INPUT>() as i32);
+    }
+
+    unsafe fn move_cursor(&self, position: (i32, i32)) {
+        let s = screen();
+        let current = cursor();
+        if current == position {
+            return;
+        }
+        let x = ((position.0 - s.left) as i64 * 65535 / (s.width - 1).max(1) as i64).clamp(0, 65535)
+            as i32;
+        let y = ((position.1 - s.top) as i64 * 65535 / (s.height - 1).max(1) as i64).clamp(0, 65535)
+            as i32;
+        self.inject(
+            MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE,
+            x,
+            y,
+            0,
+        );
+    }
+
+    unsafe fn button(&mut self, button: MouseButton, down: bool) {
+        let (index, flag) = match (button, down) {
+            (MouseButton::Left, true) => (0, MOUSEEVENTF_LEFTDOWN),
+            (MouseButton::Left, false) => (0, MOUSEEVENTF_LEFTUP),
+            (MouseButton::Middle, true) => (1, MOUSEEVENTF_MIDDLEDOWN),
+            (MouseButton::Middle, false) => (1, MOUSEEVENTF_MIDDLEUP),
+            (MouseButton::Right, true) => (2, MOUSEEVENTF_RIGHTDOWN),
+            (MouseButton::Right, false) => (2, MOUSEEVENTF_RIGHTUP),
+        };
+        self.inject(flag, 0, 0, 0);
+        self.injected[index] = down;
+    }
+
+    unsafe fn release_all(&mut self) {
+        self.was_controlling = false;
+        self.pending_input.clear();
+        let events = self.click.reset();
+        self.dispatch(events);
+        for (i, b) in [MouseButton::Left, MouseButton::Middle, MouseButton::Right]
+            .into_iter()
+            .enumerate()
+        {
+            if self.injected[i] {
+                self.button(b, false);
+            }
+        }
+    }
+
+    unsafe fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+        self.release_all();
+        self.motion.reset();
+        InvalidateRect(GetDlgItem(self.hwnd, ENABLE as i32), null(), 0);
+    }
+    unsafe fn save(&self) {
+        if self.dry_run {
+            return;
+        }
+        if let Err(error) = self.config.save() {
+            message(self.hwnd, &format!("Could not save settings: {error}"));
+        }
+    }
+    unsafe fn register_hotkeys(&self) {
+        if self.dry_run {
+            return;
+        }
+        for id in 1..=7 {
+            UnregisterHotKey(self.hwnd, id);
+        }
+        for (id, key) in [
+            (1, self.config.profile().toggle_key),
+            (2, self.config.profile().center_key),
+            (3, self.config.profile().workspace_key),
+        ] {
+            UnregisterHotKey(self.hwnd, id);
+            if key != 0 && RegisterHotKey(self.hwnd, id, MOD_NOREPEAT, key) == 0 {
+                message(
+                    self.hwnd,
+                    &format!(
+                        "Hotkey {} is already in use. Choose another key in Configuration.",
+                        key
+                    ),
+                );
+            }
+        }
+        if self.config.profile().arrow_sensitivity {
+            for (id, key) in [(4, VK_LEFT), (5, VK_RIGHT), (6, VK_UP), (7, VK_DOWN)] {
+                RegisterHotKey(self.hwnd, id, MOD_NOREPEAT, key as u32);
+            }
+        }
+    }
+    unsafe fn tray(&self, operation: u32) {
+        let mut icon: NOTIFYICONDATAW = zeroed();
+        icon.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+        icon.hWnd = self.hwnd;
+        icon.uID = 1;
+        icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        icon.uCallbackMessage = TRAY_MESSAGE;
+        icon.hIcon = self.icon;
+        let tip = wide("robocam — F11 enable / pause");
+        icon.szTip[..tip.len()].copy_from_slice(&tip);
+        Shell_NotifyIconW(operation, &icon);
+    }
+    unsafe fn tray_menu(hwnd: HWND) {
+        let menu = CreatePopupMenu();
+        for (id, label) in [
+            (209, "Open robocam"),
+            (ENABLE, "Enable / pause"),
+            (OPTIONS, "Configuration…"),
+            (QUIT, "Exit"),
+        ] {
+            AppendMenuW(menu, MF_STRING, id as usize, wide(label).as_ptr());
+        }
+        let p = cursor();
+        SetForegroundWindow(hwnd);
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.0, p.1, 0, hwnd, null());
+        DestroyMenu(menu);
+    }
+    unsafe fn inside_window(&self, hwnd: HWND, p: (i32, i32)) -> bool {
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+            return false;
+        }
+        let mut r: RECT = zeroed();
+        GetWindowRect(hwnd, &mut r);
+        p.0 >= r.left && p.0 < r.right && p.1 >= r.top && p.1 < r.bottom
+    }
+    unsafe fn bar_control_at(&self, p: (i32, i32)) -> u16 {
+        if !self.inside_window(self.bar, p) {
+            return 0;
+        }
+        let mut point = POINT { x: p.0, y: p.1 };
+        ScreenToClient(self.bar, &mut point);
+        let child = ChildWindowFromPoint(self.bar, point);
+        if child == self.bar {
+            0
+        } else {
+            GetDlgCtrlID(child) as u16
+        }
+    }
+    unsafe fn auto_hide_bar(&self, p: (i32, i32)) {
+        if !self.config.profile().show_bar || !self.config.profile().auto_hide {
+            return;
+        }
+        let mut r: RECT = zeroed();
+        GetWindowRect(self.bar, &mut r);
+        let margin = scale(20, self.dpi_for(self.bar));
+        let near = match self.config.profile().bar_position {
+            0 => p.1 < r.bottom + margin,
+            1 => p.1 > r.top - margin,
+            2 => p.0 < r.right + margin,
+            3 => p.0 > r.left - margin,
+            _ => true,
+        };
+        // Keep the full AppBar reservation while visually hidden. Revealing
+        // the controls therefore never covers a maximized application's UI.
+        if (IsWindowVisible(self.bar) != 0) != near {
+            ShowWindow(self.bar, if near { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+    }
+}
+
+unsafe extern "system" fn preview_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    data: usize,
+) -> LRESULT {
+    if !matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP) {
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    let Some(_guard) = CallbackGuard::enter() else {
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    };
+    let app = &mut *(data as *mut App);
+    if msg == WM_LBUTTONDOWN {
+        app.manual_start = Some(point_from_lp(lp));
+        SetCapture(hwnd);
+        return 0;
+    }
+    if msg == WM_LBUTTONUP {
+        app.finish_manual_roi(point_from_lp(lp));
+        ReleaseCapture();
+        return 0;
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
+}
+
+impl App {
+    unsafe fn command(&mut self, source: HWND, id: u16, notification: u16) {
+        if notification != BN_CLICKED as u16 && !matches!(id, PAGE | PROFILE) {
+            return;
+        }
+        match id {
+            ENABLE | 210 => self.toggle(),
+            OPTIONS => self.open_options(),
+            KEYBOARD => {
+                if self.dry_run {
+                    return;
+                }
+                let command = &self.config.profile().keyboard_command;
+                // ShellExecute handles App Paths and Windows' accessibility keyboard correctly.
+                let result = ShellExecuteW(
+                    self.hwnd,
+                    wide_raw("open").as_ptr(),
+                    wide_raw(command).as_ptr(),
+                    null(),
+                    null(),
+                    SW_SHOWNORMAL,
+                );
+                if result as usize <= 32 {
+                    message(
+                        self.hwnd,
+                        "Could not open the keyboard. Configure its executable path in General.",
+                    );
+                }
+            }
+            WIZARD => self.open_wizard(),
+            BAR => {
+                self.config.profile_mut().show_bar = !self.config.profile().show_bar;
+                self.create_bar();
+                self.save();
+            }
+            HELP => message(
+                self.hwnd,
+                concat!(
+                    "robocam 0.1.0\nHead-controlled mouse for Windows 11\n\n",
+                    "F11: enable / pause    F10: center pointer    F9: workspace limits\n",
+                    "Center your face in the preview, enable, then move your head. Stop over a target to click. Select an action on the click bar; select it again to lock it.\n\n",
+                    "Drag modifies the selected single-click button: stop to hold, move, then stop again to release. Scroll: stop to enter, move your head to scroll, stop again to leave. No click disables desktop clicks; the click bar remains accessible.\n\n",
+                    "To track a manual region, turn off automatic face location and drag a rectangle in the preview.\n\n",
+                    "Adapted from Enable Viacam by Cesar Mauri Loba and contributors. GPL-3.0-or-later. Camera processing stays on this computer.\n",
+                    "See README and THIRD_PARTY_NOTICES in the installation directory."
+                ),
+            ),
+            UPDATES => {
+                if self.dry_run {
+                    return;
+                }
+                if let Some((version, url)) = &self.available_release {
+                    messages::show_releases(
+                        self.hwnd,
+                        &format!("robocam {version} is available.\n\n{url}"),
+                        url,
+                    );
+                } else {
+                    // An explicit request also subscribes to an in-flight
+                    // startup check instead of silently doing nothing.
+                    self.manual_update = true;
+                    if self.update_receiver.is_none() {
+                        self.update_receiver =
+                            Some(updates::check_for_updates(env!("CARGO_PKG_VERSION")));
+                    }
+                }
+            }
+            QUIT => {
+                self.release_all();
+                self.destroy_owned(self.hwnd);
+            }
+            209 => {
+                ShowWindow(
+                    self.hwnd,
+                    if IsWindowVisible(self.hwnd) != 0 {
+                        SW_HIDE
+                    } else {
+                        SW_RESTORE
+                    },
+                );
+            }
+            201..=208 => {
+                if source == self.bar
+                    && now().saturating_sub(PHYSICAL_INPUT.load(Ordering::Relaxed)) < 100
+                    && self.was_controlling
+                {
+                    self.release_all();
+                }
+                let action = BAR_ACTIONS.iter().find(|(n, _, _)| *n == id).unwrap().2;
+                let events = self.click.select(action, self.config.profile().fast_bar);
+                self.dispatch(events);
+                self.refresh_bar_visuals();
+            }
+            PAGE if notification == CBN_SELCHANGE as u16 => {
+                self.options_page =
+                    SendMessageW(GetDlgItem(source, PAGE as i32), CB_GETCURSEL, 0, 0) as u8;
+                self.show_options_page();
+            }
+            PROFILE if notification == CBN_SELCHANGE as u16 => {
+                let name = text(GetDlgItem(source, PROFILE as i32));
+                if self.config.profiles.contains_key(&name) {
+                    self.release_all();
+                    self.config.active_profile = name;
+                    self.save();
+                    self.register_hotkeys();
+                    self.start_camera();
+                    self.create_bar();
+                    self.destroy_owned(self.options);
+                    self.options = null_mut();
+                    self.open_options();
+                }
+            }
+            SAVE => {
+                if self.read_options() {
+                    self.save();
+                    self.register_hotkeys();
+                    self.create_bar();
+                    self.start_camera();
+                    self.destroy_owned(self.options);
+                    self.options = null_mut();
+                    self.controls.clear();
+                }
+            }
+            CANCEL => {
+                self.destroy_owned(self.options);
+                self.options = null_mut();
+                self.controls.clear();
+            }
+            ADD_PROFILE => {
+                let name = text(GetDlgItem(self.options, PROFILE as i32))
+                    .trim()
+                    .to_owned();
+                if name.is_empty() || name.len() > 64 {
+                    message(
+                        self.options,
+                        "Enter a profile name of 1–64 characters in the profile box.",
+                    );
+                    return;
+                }
+                if self.config.profiles.contains_key(&name) {
+                    message(
+                        self.options,
+                        "That profile already exists. Enter a new name, then choose Save as.",
+                    );
+                    return;
+                }
+                let original = self.config.profile().clone();
+                if !self.read_options() {
+                    return;
+                }
+                let new_profile = self.config.profile().clone();
+                *self.config.profile_mut() = original;
+                self.config.profiles.insert(name.clone(), new_profile);
+                self.config.active_profile = name;
+                self.save();
+                self.register_hotkeys();
+                self.create_bar();
+                self.start_camera();
+                self.destroy_owned(self.options);
+                self.options = null_mut();
+                self.open_options();
+            }
+            DELETE_PROFILE => {
+                if self.config.profiles.len() == 1 {
+                    message(self.options, "Keep at least one profile.");
+                    return;
+                }
+                let name = self.config.active_profile.clone();
+                self.config.profiles.remove(&name);
+                self.config.active_profile = self.config.profiles.keys().next().unwrap().clone();
+                self.save();
+                self.release_all();
+                self.start_camera();
+                self.create_bar();
+                self.register_hotkeys();
+                self.destroy_owned(self.options);
+                self.options = null_mut();
+                self.open_options();
+            }
+            CAMERA_SETTINGS => {
+                if let Some(camera) = &self.camera {
+                    camera.request_camera_settings();
+                }
+            }
+            RESET => {
+                self.release_all();
+                self.start_camera();
+            }
+            NEXT => self.wizard_next(),
+            _ => {}
+        }
+    }
+
+    unsafe fn open_options(&mut self) {
+        if !self.options.is_null() {
+            ShowWindow(self.options, SW_RESTORE);
+            SetForegroundWindow(self.options);
+            return;
+        }
+        self.options = CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            wide(APP_CLASS).as_ptr(),
+            wide("robocam — Configuration").as_ptr(),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            scale(550, self.dpi_for(self.hwnd)),
+            scale(535, self.dpi_for(self.hwnd)),
+            self.hwnd,
+            null_mut(),
+            GetModuleHandleW(null()),
+            self as *mut Self as *const c_void,
+        );
+        self.prepare_window(self.options, 550, 535);
+        self.controls.clear();
+        let profile = self.child(
+            self.options,
+            "COMBOBOX",
+            "",
+            PROFILE,
+            WS_TABSTOP | CBS_DROPDOWN as u32 | WS_VSCROLL,
+            [18, 14, 276, 240],
+        );
+        for name in self.config.profiles.keys() {
+            SendMessageW(profile, CB_ADDSTRING, 0, wide_raw(name).as_ptr() as isize);
+        }
+        set_text_raw(profile, &self.config.active_profile);
+        self.child(
+            self.options,
+            "BUTTON",
+            "Save as…",
+            ADD_PROFILE,
+            WS_TABSTOP,
+            [308, 13, 98, 27],
+        );
+        self.child(
+            self.options,
+            "BUTTON",
+            "Delete",
+            DELETE_PROFILE,
+            WS_TABSTOP,
+            [414, 13, 98, 27],
+        );
+        let pages = self.child(
+            self.options,
+            "COMBOBOX",
+            "",
+            PAGE,
+            WS_TABSTOP | CBS_DROPDOWNLIST as u32,
+            [18, 51, 494, 180],
+        );
+        for name in [
+            "Pointer motion",
+            "Clicking",
+            "Camera",
+            "Click bar",
+            "General",
+        ] {
+            SendMessageW(pages, CB_ADDSTRING, 0, wide(name).as_ptr() as isize);
+        }
+        SendMessageW(pages, CB_SETCURSEL, self.options_page as usize, 0);
+        let p = self.config.profile().clone();
+        self.edit(0, 0, 400, "Horizontal speed (0–30)", p.motion.speed_x);
+        self.edit(0, 1, 401, "Vertical speed (0–30)", p.motion.speed_y);
+        self.edit(0, 2, 402, "Acceleration (0–5)", p.motion.acceleration);
+        self.edit(0, 3, 403, "Smoothing (0–8)", p.motion.smoothing);
+        self.edit(0, 4, 404, "Easy stop (0–10)", p.motion.easy_stop);
+        self.check(
+            0,
+            5,
+            405,
+            "Reverse horizontal direction",
+            p.motion.reverse_x,
+        );
+        self.check(0, 6, 406, "Reverse vertical direction", p.motion.reverse_y);
+        self.check(
+            0,
+            7,
+            407,
+            "Restrict workspace",
+            p.motion.restricted_workspace,
+        );
+        for (i, label) in [
+            "Left margin (%)",
+            "Top margin (%)",
+            "Right margin (%)",
+            "Bottom margin (%)",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.edit(0, 8 + i, 408 + i as u16, label, p.motion.margins_percent[i]);
+        }
+        self.check(
+            0,
+            12,
+            412,
+            "Wrap pointer at workspace edges",
+            p.motion.wrap_pointer,
+        );
+
+        self.choice(
+            1,
+            0,
+            420,
+            "Click method",
+            &["Dwell", "Gesture", "Disabled"],
+            match p.click.mode {
+                ClickMode::Dwell => 0,
+                ClickMode::Gesture => 1,
+                ClickMode::None => 2,
+            },
+        );
+        self.edit(1, 1, 421, "Dwell time (200–5000 ms)", p.click.dwell_ms);
+        self.edit(
+            1,
+            2,
+            422,
+            "Movement tolerance (1–8 px)",
+            p.click.tolerance_px,
+        );
+        self.check(1, 3, 423, "Allow consecutive clicks", p.click.consecutive);
+        self.check(
+            1,
+            4,
+            424,
+            "Fast gesture (fixed second dwell)",
+            p.click.fast_gesture,
+        );
+        self.check(1, 5, 425, "Play a sound on click", p.click_sound);
+        self.check(
+            1,
+            6,
+            426,
+            "Show dwell progress by the pointer",
+            p.visual_feedback,
+        );
+        self.edit(
+            1,
+            7,
+            427,
+            "Pause after physical mouse (ms)",
+            p.pause_on_mouse_ms,
+        );
+        let actions: Vec<&str> = ClickAction::ALL.iter().map(|a| a.label()).collect();
+        for (i, label) in [
+            "Gesture: move left",
+            "Gesture: move right",
+            "Gesture: move up",
+            "Gesture: move down",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = ClickAction::ALL
+                .iter()
+                .position(|a| *a == p.click.gestures[i])
+                .unwrap_or(0);
+            self.choice(1, 8 + i, 429 + i as u16, label, &actions, selected);
+        }
+        self.note(1, 12, "Gesture: dwell, move in a direction, dwell again.");
+
+        self.edit(2, 0, 440, "Camera index (0 = default)", p.camera_index);
+        self.check(2, 1, 441, "Locate face automatically", p.track_face);
+        self.edit(
+            2,
+            2,
+            442,
+            "Face-loss timeout (100–3000 ms)",
+            p.face_timeout_ms,
+        );
+        self.edit(
+            2,
+            3,
+            443,
+            "Face detection interval (50–2000 ms)",
+            p.detection_interval_ms,
+        );
+        self.note(
+            2,
+            5,
+            "For manual tracking, disable automatic face location,",
+        );
+        self.note(
+            2,
+            6,
+            "save, then drag a rectangle over your face in the preview.",
+        );
+        self.note(2, 8, "Use good front lighting and aim for at least 25 fps.");
+        self.note(
+            2,
+            9,
+            "If the camera is unavailable, close other camera apps.",
+        );
+        self.page_button(2, 10, CAMERA_SETTINGS, "Camera driver settings…");
+        self.page_button(2, 11, RESET, "Reconnect camera");
+
+        self.choice(
+            3,
+            0,
+            450,
+            "Selection behavior",
+            &["Normal (dwell to select)", "Fast (hover to select)"],
+            p.fast_bar as usize,
+        );
+        self.choice(
+            3,
+            1,
+            451,
+            "Button style",
+            &["48 px icons", "Compact text"],
+            p.thin_bar as usize,
+        );
+        self.choice(
+            3,
+            2,
+            452,
+            "Position",
+            &["Top", "Bottom", "Left", "Right", "Floating"],
+            p.bar_position as usize,
+        );
+        self.check(
+            3,
+            3,
+            453,
+            "Automatically hide bar until pointer nears edge",
+            p.auto_hide,
+        );
+        self.check(3, 4, 454, "Show click bar", p.show_bar);
+        self.note(
+            3,
+            6,
+            "Normal: select once for the next click; again to lock.",
+        );
+        self.note(3, 7, "Fast: hover for the next click; click to lock.");
+        self.note(
+            3,
+            9,
+            "Drag works with left, middle, or right single clicks.",
+        );
+        self.note(
+            3,
+            10,
+            "A second dwell releases the held button or ends scrolling.",
+        );
+
+        self.edit(
+            4,
+            0,
+            455,
+            "On-screen keyboard executable",
+            &p.keyboard_command,
+        );
+        let keys: Vec<String> = std::iter::once("Disabled".into())
+            .chain((1..=11).map(|i| format!("F{i}")))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        for (row, id, label, key) in [
+            (1, 456, "Enable / pause hotkey", p.toggle_key),
+            (2, 457, "Center pointer hotkey", p.center_key),
+            (3, 458, "Workspace toggle hotkey", p.workspace_key),
+        ] {
+            self.choice(
+                4,
+                row,
+                id,
+                label,
+                &key_refs,
+                if (0x70..=0x7A).contains(&key) {
+                    (key - 0x6F) as usize
+                } else {
+                    0
+                },
+            );
+        }
+        self.check(
+            4,
+            4,
+            459,
+            "Enable head control at startup",
+            self.config.enabled_at_startup,
+        );
+        self.check(
+            4,
+            5,
+            460,
+            "Start minimized in the notification area",
+            self.config.minimized_at_startup,
+        );
+        self.check(
+            4,
+            6,
+            461,
+            "Start robocam when I sign in to Windows",
+            login_enabled(),
+        );
+        self.check(
+            4,
+            7,
+            462,
+            "Arrow hotkeys adjust pointer speed",
+            p.arrow_sensitivity,
+        );
+        self.check(
+            4,
+            8,
+            463,
+            "Check for updates at startup",
+            self.config.check_updates,
+        );
+        self.edit(
+            4,
+            9,
+            464,
+            "Delay between button events (0–50 ms)",
+            p.event_delay_ms,
+        );
+        self.choice(
+            4,
+            10,
+            465,
+            "Language (restart required)",
+            &["English", "Italiano"],
+            (self.config.language == "it") as usize,
+        );
+        self.note(4, 11, "Closing the main window keeps robocam in the tray.");
+        self.note(
+            4,
+            12,
+            "Use File > Exit or the tray menu to stop it completely.",
+        );
+        self.child(
+            self.options,
+            "BUTTON",
+            "Save",
+            SAVE,
+            WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            [308, 462, 98, 28],
+        );
+        self.child(
+            self.options,
+            "BUTTON",
+            "Cancel",
+            CANCEL,
+            WS_TABSTOP,
+            [414, 462, 98, 28],
+        );
+        self.show_options_page();
+        ShowWindow(self.options, SW_SHOW);
+        SetForegroundWindow(self.options);
+    }
+
+    unsafe fn edit(
+        &mut self,
+        page: u8,
+        row: usize,
+        id: u16,
+        label: &str,
+        value: impl std::fmt::Display,
+    ) {
+        let y = 90 + row as i32 * 27;
+        let label = self.child(self.options, "STATIC", label, 0, 0, [20, y + 4, 306, 23]);
+        self.controls.push((label, page));
+        let field = self.child(
+            self.options,
+            "EDIT",
+            &value.to_string(),
+            id,
+            WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+            [332, y, 178, 24],
+        );
+        self.controls.push((field, page));
+    }
+    unsafe fn check(&mut self, page: u8, row: usize, id: u16, label: &str, value: bool) {
+        let field = self.child(
+            self.options,
+            "BUTTON",
+            label,
+            id,
+            WS_TABSTOP | BS_AUTOCHECKBOX as u32,
+            [20, 90 + row as i32 * 27, 490, 24],
+        );
+        SendMessageW(
+            field,
+            BM_SETCHECK,
+            if value { BST_CHECKED } else { BST_UNCHECKED } as usize,
+            0,
+        );
+        self.controls.push((field, page));
+    }
+    unsafe fn choice(
+        &mut self,
+        page: u8,
+        row: usize,
+        id: u16,
+        label: &str,
+        items: &[&str],
+        selected: usize,
+    ) {
+        let y = 90 + row as i32 * 27;
+        let label = self.child(self.options, "STATIC", label, 0, 0, [20, y + 4, 260, 23]);
+        self.controls.push((label, page));
+        let field = self.child(
+            self.options,
+            "COMBOBOX",
+            "",
+            id,
+            WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
+            [286, y, 224, 240],
+        );
+        for item in items {
+            SendMessageW(field, CB_ADDSTRING, 0, wide(item).as_ptr() as isize);
+        }
+        SendMessageW(field, CB_SETCURSEL, selected, 0);
+        self.controls.push((field, page));
+    }
+    unsafe fn note(&mut self, page: u8, row: usize, label: &str) {
+        let field = self.child(
+            self.options,
+            "STATIC",
+            label,
+            0,
+            0,
+            [20, 90 + row as i32 * 27, 495, 24],
+        );
+        self.controls.push((field, page));
+    }
+    unsafe fn page_button(&mut self, page: u8, row: usize, id: u16, label: &str) {
+        let field = self.child(
+            self.options,
+            "BUTTON",
+            label,
+            id,
+            WS_TABSTOP,
+            [20, 90 + row as i32 * 27, 250, 25],
+        );
+        self.controls.push((field, page));
+    }
+    unsafe fn show_options_page(&self) {
+        for (hwnd, page) in &self.controls {
+            ShowWindow(
+                *hwnd,
+                if *page == self.options_page {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
+    unsafe fn number(&self, id: u16, min: u64, max: u64) -> Result<u64, String> {
+        let value = text(GetDlgItem(self.options, id as i32));
+        match value.trim().parse::<u64>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(format!(
+                "Enter a number between {min} and {max} (field contains {value:?})."
+            )),
+        }
+    }
+    unsafe fn checked(&self, id: u16) -> bool {
+        SendMessageW(GetDlgItem(self.options, id as i32), BM_GETCHECK, 0, 0) == BST_CHECKED as isize
+    }
+    unsafe fn selected(&self, id: u16) -> usize {
+        SendMessageW(GetDlgItem(self.options, id as i32), CB_GETCURSEL, 0, 0).max(0) as usize
+    }
+
+    unsafe fn read_options(&mut self) -> bool {
+        let result = (|| -> Result<Profile, String> {
+            let mut p = self.config.profile().clone();
+            p.motion.speed_x = self.number(400, 0, 30)? as u8;
+            p.motion.speed_y = self.number(401, 0, 30)? as u8;
+            p.motion.acceleration = self.number(402, 0, 5)? as u8;
+            p.motion.smoothing = self.number(403, 0, 8)? as u8;
+            p.motion.easy_stop = self.number(404, 0, 10)? as u8;
+            p.motion.reverse_x = self.checked(405);
+            p.motion.reverse_y = self.checked(406);
+            p.motion.restricted_workspace = self.checked(407);
+            for i in 0..4 {
+                p.motion.margins_percent[i] = self.number(408 + i as u16, 0, 50)? as u8;
+            }
+            p.motion.wrap_pointer = self.checked(412);
+            p.click.mode = match self.selected(420) {
+                1 => ClickMode::Gesture,
+                2 => ClickMode::None,
+                _ => ClickMode::Dwell,
+            };
+            p.click.dwell_ms = self.number(421, 200, 5000)?;
+            p.click.tolerance_px = self.number(422, 1, 8)? as u8;
+            p.click.consecutive = self.checked(423);
+            p.click.fast_gesture = self.checked(424);
+            p.click_sound = self.checked(425);
+            p.visual_feedback = self.checked(426);
+            p.pause_on_mouse_ms = self.number(427, 0, 10000)?;
+            for i in 0..4 {
+                p.click.gestures[i] = ClickAction::ALL[self.selected(429 + i as u16).min(7)];
+            }
+            p.camera_index = self.number(440, 0, 32)? as i32;
+            p.track_face = self.checked(441);
+            p.face_timeout_ms = self.number(442, 100, 3000)?;
+            p.detection_interval_ms = self.number(443, 50, 2000)?;
+            p.fast_bar = self.selected(450) == 1;
+            p.thin_bar = self.selected(451) == 1;
+            p.bar_position = self.selected(452) as u8;
+            p.auto_hide = self.checked(453);
+            p.show_bar = self.checked(454);
+            p.keyboard_command = text(GetDlgItem(self.options, 455));
+            let key = |id| {
+                if self.selected(id) == 0 {
+                    0
+                } else {
+                    self.selected(id) as u32 + 0x6F
+                }
+            };
+            p.toggle_key = key(456);
+            p.center_key = key(457);
+            p.workspace_key = key(458);
+            p.arrow_sensitivity = self.checked(462);
+            p.event_delay_ms = self.number(464, 0, 50)?;
+            let hotkeys = [p.toggle_key, p.center_key, p.workspace_key];
+            for i in 0..3 {
+                for j in i + 1..3 {
+                    if hotkeys[i] != 0 && hotkeys[i] == hotkeys[j] {
+                        return Err("Choose a different hotkey for each action.".into());
+                    }
+                }
+            }
+            if p.keyboard_command.trim().is_empty() {
+                return Err("Enter an on-screen keyboard executable.".into());
+            }
+            Ok(p)
+        })();
+        match result {
+            Ok(profile) => {
+                if !self.dry_run
+                    && let Err(e) = set_login(self.checked(461))
+                {
+                    message(
+                        self.options,
+                        &format!("Could not change startup setting: {e}"),
+                    );
+                    return false;
+                }
+                self.release_all();
+                *self.config.profile_mut() = profile;
+                self.config.enabled_at_startup = self.checked(459);
+                self.config.minimized_at_startup = self.checked(460);
+                self.config.check_updates = self.checked(463);
+                self.config.language = if self.selected(465) == 1 { "it" } else { "en" }.into();
+                true
+            }
+            Err(error) => {
+                message(self.options, &error);
+                false
+            }
+        }
+    }
+
+    unsafe fn finish_manual_roi(&mut self, end: (i32, i32)) {
+        let Some(start) = self.manual_start.take() else {
+            return;
+        };
+        if self.config.profile().track_face {
+            return;
+        }
+        let mut r: RECT = zeroed();
+        GetClientRect(GetDlgItem(self.hwnd, PREVIEW as i32), &mut r);
+        let left = start.0.min(end.0).max(0);
+        let top = start.1.min(end.1).max(0);
+        let width = (start.0 - end.0).abs().min(r.right - left);
+        let height = (start.1 - end.1).abs().min(r.bottom - top);
+        if width < 20 || height < 20 || r.right <= 0 || r.bottom <= 0 {
+            return;
+        }
+        self.config.profile_mut().manual_area = [
+            left as f32 / r.right as f32,
+            top as f32 / r.bottom as f32,
+            width as f32 / r.right as f32,
+            height as f32 / r.bottom as f32,
+        ];
+        self.save();
+        self.start_camera();
+    }
+}
+
+unsafe fn login_enabled() -> bool {
+    use windows_sys::Win32::System::Registry::*;
+    let mut key: HKEY = null_mut();
+    if RegOpenKeyExW(
+        HKEY_CURRENT_USER,
+        wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
+        0,
+        KEY_READ,
+        &mut key,
+    ) != ERROR_SUCCESS
+    {
+        return false;
+    }
+    let result = RegQueryValueExW(
+        key,
+        wide("robocam").as_ptr(),
+        null(),
+        null_mut(),
+        null_mut(),
+        null_mut(),
+    );
+    RegCloseKey(key);
+    result == ERROR_SUCCESS
+}
+unsafe fn set_login(enabled: bool) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+    let mut key: HKEY = null_mut();
+    let status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
+        0,
+        null(),
+        0,
+        KEY_SET_VALUE,
+        null(),
+        &mut key,
+        null_mut(),
+    );
+    if status != ERROR_SUCCESS {
+        return Err(format!("Windows error {status}"));
+    }
+    let status = if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let value = wide_raw(&format!("\"{}\" --minimized", exe.display()));
+        RegSetValueExW(
+            key,
+            wide("robocam").as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr() as *const u8,
+            (value.len() * 2) as u32,
+        )
+    } else {
+        RegDeleteValueW(key, wide("robocam").as_ptr())
+    };
+    RegCloseKey(key);
+    if status == ERROR_SUCCESS || (!enabled && status == ERROR_FILE_NOT_FOUND) {
+        Ok(())
+    } else {
+        Err(format!("Windows error {status}"))
+    }
+}
+
+impl App {
+    unsafe fn open_wizard(&mut self) {
+        if !self.wizard.is_null() {
+            SetForegroundWindow(self.wizard);
+            return;
+        }
+        self.enabled = false;
+        self.release_all();
+        self.wizard_step = 0;
+        self.calibration_started = 0;
+        self.wizard = CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            wide(APP_CLASS).as_ptr(),
+            wide("robocam — Setup").as_ptr(),
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            scale(400, self.dpi_for(self.hwnd)),
+            scale(300, self.dpi_for(self.hwnd)),
+            self.hwnd,
+            null_mut(),
+            GetModuleHandleW(null()),
+            self as *mut Self as *const c_void,
+        );
+        self.prepare_window(self.wizard, 400, 300);
+        self.child(self.wizard, "STATIC", "", 330, 0, [20, 18, 350, 185]);
+        self.child(
+            self.wizard,
+            "BUTTON",
+            "Next",
+            NEXT,
+            WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            [254, 218, 112, 28],
+        );
+        self.wizard_text();
+        ShowWindow(self.hwnd, SW_RESTORE);
+        ShowWindow(self.wizard, SW_SHOW);
+    }
+    unsafe fn wizard_text(&self) {
+        let description = match self.wizard_step {
+            0 => {
+                "Welcome to robocam\n\nPosition your camera in front of you with good, even lighting. Your face should occupy roughly one third of the preview width.\n\nThis setup measures your comfortable head movement to adjust pointer speed. Head control is paused during calibration."
+            }
+            1 => {
+                "Frame your face\n\nLook at the live camera preview. Center your face until a tracking rectangle appears.\n\nNext, you will have 8 seconds to move your head slowly LEFT and RIGHT over a comfortable range. Keep your shoulders still."
+            }
+            2 => {
+                "Horizontal calibration\n\nMove your head slowly LEFT and RIGHT over a comfortable range. Do not force the movement.\n\nWait until the measurement completes. Next you will move UP and DOWN for 8 seconds."
+            }
+            3 => {
+                "Vertical calibration\n\nMove your head slowly UP and DOWN over a comfortable range.\n\nWait until the measurement completes, then choose Next to review your settings."
+            }
+            _ => {
+                "Ready\n\nYour pointer speeds have been adjusted.\n\nPress F11 to enable head control. Move your head to move the pointer; hold still to click. Select different clicks on the top bar.\n\nYou can tune speed, smoothing and dwell time in Configuration at any time."
+            }
+        };
+        set_text(GetDlgItem(self.wizard, 330), description);
+        set_text(
+            GetDlgItem(self.wizard, NEXT as i32),
+            if self.wizard_step == 4 {
+                "Finish"
+            } else {
+                "Next"
+            },
+        );
+    }
+    unsafe fn start_measurement(&mut self) {
+        self.calibration_started = now();
+        self.calibration_position = (0.0, 0.0);
+        self.calibration_min = (0.0, 0.0);
+        self.calibration_max = (0.0, 0.0);
+        EnableWindow(GetDlgItem(self.wizard, NEXT as i32), 0);
+        self.wizard_text();
+    }
+    unsafe fn wizard_next(&mut self) {
+        match self.wizard_step {
+            0 => {
+                self.wizard_step = 1;
+                self.wizard_text();
+            }
+            1 => {
+                if !self
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.face_detected || !self.config.profile().track_face)
+                {
+                    message(
+                        self.wizard,
+                        "Wait until your face is detected in the preview before starting.",
+                    );
+                    return;
+                }
+                self.wizard_step = 2;
+                self.start_measurement();
+            }
+            2 => {
+                if self.calibration_x < 4.0 {
+                    self.start_measurement();
+                } else {
+                    self.wizard_step = 3;
+                    self.start_measurement();
+                }
+            }
+            3 => {
+                if self.calibration_y < 4.0 {
+                    self.start_measurement();
+                    return;
+                }
+                let desktop = screen();
+                let speed = |distance: f32, extent: i32| {
+                    (6.0 * (extent as f32 / (distance * 1.6)).ln())
+                        .round()
+                        .clamp(1.0, 30.0) as u8
+                };
+                let sx = speed(self.calibration_x, desktop.width);
+                let sy = speed(self.calibration_y, desktop.height);
+                self.config.profile_mut().motion.speed_x = sx;
+                self.config.profile_mut().motion.speed_y = sy;
+                self.wizard_step = 4;
+                self.wizard_text();
+            }
+            _ => {
+                self.config.wizard_completed = true;
+                self.save();
+                self.destroy_owned(self.wizard);
+                self.wizard = null_mut();
+            }
+        }
+    }
+    unsafe fn calibrate_frame(&mut self, dx: f32, dy: f32, tracking: bool) {
+        if tracking {
+            self.calibration_position.0 += dx;
+            self.calibration_position.1 += dy;
+            self.calibration_min.0 = self.calibration_min.0.min(self.calibration_position.0);
+            self.calibration_min.1 = self.calibration_min.1.min(self.calibration_position.1);
+            self.calibration_max.0 = self.calibration_max.0.max(self.calibration_position.0);
+            self.calibration_max.1 = self.calibration_max.1.max(self.calibration_position.1);
+        }
+        if now().saturating_sub(self.calibration_started) < 8000 {
+            return;
+        }
+        self.calibration_started = 0;
+        let range = if self.wizard_step == 2 {
+            self.calibration_max.0 - self.calibration_min.0
+        } else {
+            self.calibration_max.1 - self.calibration_min.1
+        };
+        if self.wizard_step == 2 {
+            self.calibration_x = range;
+        } else {
+            self.calibration_y = range;
+        }
+        set_text(
+            GetDlgItem(self.wizard, 330),
+            if range < 4.0 {
+                "Not enough movement was measured.\n\nCheck that your face is visible and well lit. Choose Retry and move your head slowly over a comfortable range."
+            } else {
+                "Measurement complete.\n\nChoose Next to continue."
+            },
+        );
+        set_text(
+            GetDlgItem(self.wizard, NEXT as i32),
+            if range < 4.0 { "Retry" } else { "Next" },
+        );
+        EnableWindow(GetDlgItem(self.wizard, NEXT as i32), 1);
+    }
+
+    unsafe fn poll_updates(&mut self) {
+        let Some(result) = self
+            .update_receiver
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        else {
+            return;
+        };
+        self.update_receiver = None;
+        let description = match result {
+            UpdateResult::NewRelease { version, url } => {
+                let description = format!("robocam {version} is available.\n\n{url}");
+                set_text(self.hwnd, &format!("robocam — update {version} available"));
+                self.available_release = Some((version, url));
+                description
+            }
+            UpdateResult::Current => "You are running the latest published version.".into(),
+            UpdateResult::NotPublished => "No robocam release has been published yet.".into(),
+            UpdateResult::Failed(error) => format!("Could not check for updates: {error}"),
+        };
+        if self.manual_update {
+            self.manual_update = false;
+            let url = self
+                .available_release
+                .as_ref()
+                .map_or(updates::RELEASES_URL, |(_, url)| url.as_str());
+            messages::show_releases(self.hwnd, &description, url);
+        }
+    }
+}

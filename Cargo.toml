@@ -1,0 +1,31 @@
+[package]
+name = "robocam"
+version = "0.1.0"
+edition = "2024"
+description = "Head-controlled mouse for Windows 11"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+opencv = { version = "0.101.1", default-features = false, features = ["clang-runtime", "imgproc", "objdetect", "video", "videoio"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell",
+  "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_System_Registry",
+  "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation",
+  "Win32_Storage_FileSystem"
+  , "Win32_System_Diagnostics_Debug"
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
