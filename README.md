@@ -43,6 +43,11 @@ space so maximized windows do not overlap it. The order is:
 Mouse icons have three buttons plus a central wheel; the relevant button/wheel is
 red. There is no floating cursor progress bar.
 
+For greater visibility, enable **Configuration > Click bar > High-contrast bar
+(black background)** and press **Save**. The bar uses thicker white icons, yellow
+selection markers, and bright red mouse-button highlights on black. This option
+also works with compact text buttons and is remembered separately for each profile.
+
 Select an action once to use it for the next click; select it again to lock it.
 Fast mode selects on hover and locks on activation. Drag applies to the selected
 single mouse button: dwell to hold, move, then dwell again to release. Wheel mode

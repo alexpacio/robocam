@@ -305,6 +305,19 @@ pub fn run() {
             message(null_mut(), "Could not register the robocam window.");
             return;
         }
+        let contrast_class_name = wide_raw("robocam.high-contrast-bar");
+        let contrast_class = WNDCLASSW {
+            lpszClassName: contrast_class_name.as_ptr(),
+            hbrBackground: GetStockObject(BLACK_BRUSH) as HBRUSH,
+            ..class
+        };
+        if RegisterClassW(&contrast_class) == 0 {
+            message(
+                null_mut(),
+                "Could not register the high-contrast click bar.",
+            );
+            return;
+        }
         let (config, warning) = Settings::load();
         crate::i18n::set_language(&config.language);
         let font = CreateFontW(
@@ -1187,7 +1200,12 @@ impl App {
         GetWindowRect(self.hwnd, &mut main_rect);
         self.bar = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            wide(APP_CLASS).as_ptr(),
+            wide_raw(if self.config.profile().high_contrast_bar {
+                "robocam.high-contrast-bar"
+            } else {
+                APP_CLASS
+            })
+            .as_ptr(),
             wide("robocam click bar").as_ptr(),
             WS_POPUP | WS_CLIPCHILDREN,
             main_rect.left,
@@ -1230,7 +1248,7 @@ impl App {
                 "BUTTON",
                 title,
                 id,
-                if thin {
+                if thin && !self.config.profile().high_contrast_bar {
                     BS_PUSHBUTTON as u32
                 } else {
                     BS_OWNERDRAW as u32
@@ -1970,7 +1988,9 @@ impl App {
             HELP => message(
                 self.hwnd,
                 concat!(
-                    "robocam 0.1.0\nHead-controlled mouse for Windows 11\n\n",
+                    "robocam ",
+                    env!("CARGO_PKG_VERSION"),
+                    "\nHead-controlled mouse for Windows 11\n\n",
                     "F11: enable / pause    F10: center pointer    F9: workspace limits\n",
                     "Center your face in the preview, enable, then move your head. Stop over a target to click. Select an action on the click bar; select it again to lock it.\n\n",
                     "Drag modifies the selected single-click button: stop to hold, move, then stop again to release. Scroll: stop to enter, move your head to scroll, stop again to leave. No click disables desktop clicks; the click bar remains accessible.\n\n",
@@ -2404,6 +2424,13 @@ impl App {
             p.auto_hide,
         );
         self.check(3, 4, 454, "Show click bar", p.show_bar);
+        self.check(
+            3,
+            5,
+            466,
+            "High-contrast bar (black background)",
+            p.high_contrast_bar,
+        );
         self.note(
             3,
             6,
@@ -2695,6 +2722,7 @@ impl App {
             p.bar_position = self.selected(452) as u8;
             p.auto_hide = self.checked(453);
             p.show_bar = self.checked(454);
+            p.high_contrast_bar = self.checked(466);
             p.keyboard_command = text(GetDlgItem(self.options, 455));
             p.enabled_at_startup = Some(self.checked(459));
             let key = |id| {

@@ -208,6 +208,7 @@ fn static_italian(text: &str) -> Option<&'static str> {
             "Nascondi la barra finché il puntatore non si avvicina al bordo"
         }
         "Show click bar" => "Mostra barra dei clic",
+        "High-contrast bar (black background)" => "Barra ad alto contrasto (sfondo nero)",
         "Normal: select once for the next click; again to lock." => {
             "Normale: seleziona per il prossimo clic; riseleziona per fissare."
         }

@@ -12,6 +12,8 @@ const TEAL: u32 = color(0, 113, 105);
 const SELECTED: u32 = color(216, 241, 235);
 const MUTED: u32 = color(124, 137, 143);
 const WHITE: u32 = color(255, 255, 255);
+const BLACK: u32 = color(0, 0, 0);
+const YELLOW: u32 = color(255, 230, 0);
 
 /// A compatible surface avoids partially drawn icons and camera frames.
 struct BufferedDc {
@@ -110,10 +112,14 @@ impl App {
             };
             let pressed = item.itemState & ODS_SELECTED != 0;
             let disabled = item.itemState & ODS_DISABLED != 0;
+            let high_contrast =
+                GetParent(item.hwndItem) == self.bar && self.config.profile().high_contrast_bar;
             fill(
                 dc,
                 rectangle,
-                if pressed {
+                if high_contrast {
+                    BLACK
+                } else if pressed {
                     rgb(189, 225, 216)
                 } else if active {
                     SELECTED
@@ -130,14 +136,25 @@ impl App {
                         right: width,
                         bottom: height,
                     },
-                    TEAL,
+                    if high_contrast { YELLOW } else { TEAL },
                 );
+            }
+            if high_contrast && (active || pressed) {
+                outline_rectangle(dc, rectangle, YELLOW, scale(2, dpi));
             }
             let icon_size = scale(if id >= 200 { 48 } else { 32 }, dpi)
                 .min(width)
                 .min(height);
             let offset = scale(i32::from(pressed), dpi);
-            let color = if disabled {
+            let color = if high_contrast {
+                if disabled {
+                    rgb(170, 170, 170)
+                } else if active || pressed {
+                    YELLOW
+                } else {
+                    WHITE
+                }
+            } else if disabled {
                 MUTED
             } else if active {
                 TEAL
@@ -146,62 +163,90 @@ impl App {
             };
             let mut icon = Outline::new(
                 dc,
-                (width - icon_size) / 2 + offset,
-                (height - icon_size) / 2 + offset,
-                icon_size,
+                [
+                    (width - icon_size) / 2 + offset,
+                    (height - icon_size) / 2 + offset,
+                    icon_size,
+                ],
                 color,
                 dpi,
+                high_contrast,
             );
-            match id {
-                ENABLE | 210 => icon.power(self.enabled),
-                OPTIONS => icon.sliders(),
-                KEYBOARD => icon.keyboard(),
-                WIZARD => icon.wand(),
-                BAR => icon.bar(),
-                HELP => icon.help(),
-                209 => icon.robot(),
-                201 => {
-                    icon.mouse(0);
-                    icon.line(7, 40, 41, 7);
+            let compact = high_contrast && self.config.profile().thin_bar;
+            if compact {
+                label(
+                    dc,
+                    &text(item.hwndItem),
+                    rectangle,
+                    color,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            } else {
+                match id {
+                    ENABLE | 210 => icon.power(self.enabled),
+                    OPTIONS => icon.sliders(),
+                    KEYBOARD => icon.keyboard(),
+                    WIZARD => icon.wand(),
+                    BAR => icon.bar(),
+                    HELP => icon.help(),
+                    209 => icon.robot(),
+                    201 => {
+                        icon.mouse(0);
+                        icon.line(7, 40, 41, 7);
+                    }
+                    202 => {
+                        icon.mouse(1);
+                        icon.number("1");
+                    }
+                    203 => icon.mouse(2),
+                    204 => icon.mouse(3),
+                    205 => {
+                        icon.mouse(1);
+                        icon.number("2");
+                    }
+                    206 => {
+                        icon.mouse(1);
+                        icon.number("3");
+                    }
+                    207 => {
+                        icon.mouse(match self.click.drag_button() {
+                            MouseButton::Left => 1,
+                            MouseButton::Middle => 2,
+                            MouseButton::Right => 3,
+                        });
+                        icon.arrow(35, 33, 26, 33);
+                        icon.arrow(35, 33, 44, 33);
+                        icon.arrow(35, 33, 35, 24);
+                        icon.arrow(35, 33, 35, 42);
+                    }
+                    208 => {
+                        icon.mouse(4);
+                        icon.arrow(38, 23, 38, 7);
+                        icon.arrow(38, 27, 38, 43);
+                    }
+                    211 => {
+                        icon.mouse(1);
+                        icon.number("SU");
+                    }
+                    _ => {}
                 }
-                202 => {
-                    icon.mouse(1);
-                    icon.number("1");
-                }
-                203 => icon.mouse(2),
-                204 => icon.mouse(3),
-                205 => {
-                    icon.mouse(1);
-                    icon.number("2");
-                }
-                206 => {
-                    icon.mouse(1);
-                    icon.number("3");
-                }
-                207 => {
-                    icon.mouse(match self.click.drag_button() {
-                        MouseButton::Left => 1,
-                        MouseButton::Middle => 2,
-                        MouseButton::Right => 3,
-                    });
-                    icon.arrow(35, 33, 26, 33);
-                    icon.arrow(35, 33, 44, 33);
-                    icon.arrow(35, 33, 35, 24);
-                    icon.arrow(35, 33, 35, 42);
-                }
-                208 => {
-                    icon.mouse(4);
-                    icon.arrow(38, 23, 38, 7);
-                    icon.arrow(38, 27, 38, 43);
-                }
-                211 => {
-                    icon.mouse(1);
-                    icon.number("SU");
-                }
-                _ => {}
             }
             if action.is_some_and(|action| self.click.locked() == action) {
-                icon.lock();
+                if compact {
+                    outline_rectangle(
+                        dc,
+                        RECT {
+                            left: scale(4, dpi),
+                            top: scale(4, dpi),
+                            right: width - scale(4, dpi),
+                            bottom: height - scale(4, dpi),
+                        },
+                        color,
+                        scale(1, dpi),
+                    );
+                } else {
+                    icon.lock();
+                }
             }
             drop(icon);
             if item.itemState & ODS_FOCUS != 0 {
@@ -379,16 +424,32 @@ struct Outline {
     y: i32,
     size: i32,
     color: u32,
+    high_contrast: bool,
     pen: HPEN,
     previous_pen: HGDIOBJ,
     previous_brush: HGDIOBJ,
 }
 
 impl Outline {
-    unsafe fn new(dc: HDC, x: i32, y: i32, size: i32, color: u32, dpi: u32) -> Self {
+    unsafe fn new(
+        dc: HDC,
+        [x, y, size]: [i32; 3],
+        color: u32,
+        dpi: u32,
+        high_contrast: bool,
+    ) -> Self {
         let pen = CreatePen(
             PS_SOLID,
-            scale(if size >= scale(28, dpi) { 2 } else { 1 }, dpi),
+            scale(
+                if high_contrast {
+                    3
+                } else if size >= scale(28, dpi) {
+                    2
+                } else {
+                    1
+                },
+                dpi,
+            ),
             color,
         );
         let previous_pen = SelectObject(dc, pen);
@@ -399,6 +460,7 @@ impl Outline {
             y,
             size,
             color,
+            high_contrast,
             pen,
             previous_pen,
             previous_brush,
@@ -471,7 +533,11 @@ impl Outline {
         self.line(19, 6, 19, 23);
         self.line(28, 6, 28, 23);
         self.line(10, 23, 37, 23);
-        let red = rgb(215, 35, 42);
+        let red = if self.high_contrast {
+            rgb(255, 70, 70)
+        } else {
+            rgb(215, 35, 42)
+        };
         let region = match button {
             1 => Some((11, 8, 7, 13)),
             2 => Some((21, 6, 6, 17)),
@@ -486,7 +552,13 @@ impl Outline {
             DeleteObject(brush);
         }
         // The central button and wheel are distinct parts of the drawing.
-        let brush = CreateSolidBrush(if button == 4 { red } else { rgb(242, 242, 242) });
+        let brush = CreateSolidBrush(if button == 4 {
+            red
+        } else if self.high_contrast {
+            BLACK
+        } else {
+            rgb(242, 242, 242)
+        });
         let old = SelectObject(self.dc, brush);
         self.round(22, 10, 4, 9, 3);
         SelectObject(self.dc, old);
@@ -506,7 +578,7 @@ impl Outline {
                 right: self.px(45),
                 bottom: self.py(44),
             },
-            WHITE,
+            if self.high_contrast { BLACK } else { WHITE },
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
     }

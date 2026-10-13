@@ -81,7 +81,7 @@ $opencvLicenses = Join-Path $licenses 'opencv'
 New-Item -ItemType Directory -Force -Path $opencvLicenses | Out-Null
 Copy-Item -LiteralPath (Join-Path $env:ROBOCAM_OPENCV_ROOT 'build\LICENSE') -Destination (Join-Path $opencvLicenses 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $env:ROBOCAM_OPENCV_ROOT 'build\etc\licenses') -Destination (Join-Path $opencvLicenses 'third-party') -Recurse
-foreach ($file in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md')) {
+foreach ($file in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'CHANGELOG.md')) {
     if (Test-Path (Join-Path $repository $file)) { Copy-Item -LiteralPath (Join-Path $repository $file) -Destination $stage }
 }
 if (Test-Path (Join-Path $repository 'docs')) { Copy-Item -LiteralPath (Join-Path $repository 'docs') -Destination $stage -Recurse }
@@ -111,7 +111,7 @@ try {
 } finally { Pop-Location }
 
 # Ship the exact robocam source used for this build, including local uncommitted edits.
-foreach ($entry in @('.cargo', '.github', 'assets', 'docs', 'installer', 'scripts', 'src', 'tests', 'Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'plan.md', '.gitignore')) {
+foreach ($entry in @('.cargo', '.github', 'assets', 'docs', 'installer', 'scripts', 'src', 'tests', 'Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'README.md', 'AGENTS.md', 'CHANGELOG.md', 'plan.md', '.gitignore')) {
     $path = Join-Path $repository $entry
     if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination $sourceStage -Recurse }
 }
