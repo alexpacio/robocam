@@ -89,7 +89,8 @@ guarantee responsiveness when camera drivers or other hardware stall.
 The toolbar is a Shell AppBar. Top/bottom docking spans monitor width and reserves
 desktop work area; buttons start at the left. It stays visible through Show Desktop,
 Peek and minimization; only application shutdown removes its reservation. The main
-window minimizes to the tray and can be restored by the last bar button or tray icon.
+window minimizes to the tray and can be restored by the main-window button
+(position 10) or tray icon. The last button is now full pause/resume.
 Main icons use 28 logical pixels in 36-pixel buttons and click icons
 use 40 in 48-pixel buttons. They share a 48-unit grid with round caps and joins,
 with per-monitor DPI scaling. GDI does not antialias, so each button is painted at

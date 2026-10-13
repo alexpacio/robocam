@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 - 2026-10-13
+
+- Corrected the detailed toolbar guide: position 10 restores the main window;
+  the final button now pauses/resumes both webcam movement and clicks.
+- Includes 0.5.0's native webcam zoom (Robo default 382 on Anker C200, written only
+  when different), full pause, matching SketchUp double/triple controls, and README
+  screenshots. Application behavior is unchanged from 0.5.0.
+
 ## 0.5.0 - 2026-10-13
 
 - Added saved, fixed webcam zoom through the native Windows camera driver. The
