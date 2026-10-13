@@ -112,6 +112,29 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Pause / resume movement and clicks" => "Pausa / riprendi movimento e clic",
         "Pause movement and clicks hotkey" => "Tasto pausa movimento e clic",
         "Confirm" => "Conferma",
+        "robocam — Updates" => "robocam — Aggiornamenti",
+        "Checking for updates…" => "Ricerca aggiornamenti…",
+        "Check again" => "Controlla di nuovo",
+        "Download and install" => "Scarica e installa",
+        "Downloading and verifying the update…" => "Download e verifica aggiornamento…",
+        "Preparing the update. Head control stays active until installation begins…" => {
+            "Preparazione aggiornamento. Il controllo con la testa resta attivo fino all'inizio dell'installazione…"
+        }
+        "An update is available. Download and install it now?\n\nRobocam will restart automatically. Profiles and saved settings will be retained." => {
+            "È disponibile un aggiornamento. Scaricarlo e installarlo ora?\n\nRobocam si riavvierà automaticamente. Profili e impostazioni salvate verranno conservati."
+        }
+        "Update failed. Robocam remains available." => {
+            "Aggiornamento non riuscito. Robocam resta disponibile."
+        }
+        "Update installed. Profiles and settings have been retained." => {
+            "Aggiornamento installato. Profili e impostazioni sono stati conservati."
+        }
+        "Update failed. The previous installation was restored when possible." => {
+            "Aggiornamento non riuscito. L'installazione precedente è stata ripristinata quando possibile."
+        }
+        "Windows must be restarted to finish the update. Robocam will not restart Windows automatically." => {
+            "Per completare l'aggiornamento occorre riavviare Windows. Robocam non riavvierà Windows automaticamente."
+        }
         "Pause webcam movement and clicks?\n\nHead control stays active until you confirm. To resume afterwards, use the full-pause hotkey or a physical mouse." => {
             "Mettere in pausa movimento e clic dalla webcam?\n\nIl controllo con la testa resta attivo fino alla conferma. Per riprendere, usa il tasto rapido della pausa completa o un mouse fisico."
         }

@@ -134,6 +134,7 @@ impl App {
             .into_iter()
             .find(|id| hit == GetDlgItem(self.hwnd, i32::from(*id)));
         let confirmation = messages::pause_window();
+        let update_control = updater::control_at(position);
         let answer = if confirmation.is_null() {
             None
         } else {
@@ -143,9 +144,11 @@ impl App {
         };
         // The entire bar, including gaps and padding, excludes desktop dwell.
         let over_bar = self.inside_window(self.bar, position)
+            || update_control.is_some()
             || main_control.is_some()
             || (!confirmation.is_null() && self.inside_window(confirmation, position));
         let bar_control = main_control
+            .or(update_control.map(|(_, id)| id + 214))
             .or(answer.map(|id| id + 212))
             .unwrap_or_else(|| self.bar_control_at(position));
         if bar_control != self.hover_id
@@ -166,14 +169,16 @@ impl App {
                 self.click.hover(*action, true);
             }
             if bar_control != 0
-                && (self.enabled || matches!(bar_control, 210 | ENABLE | 212..=214))
+                && (self.enabled || matches!(bar_control, 210 | ENABLE | 212..=216))
                 && !self.hover_done
                 && time.saturating_sub(self.hover_since) >= self.config.profile().click.dwell_ms
             {
                 self.hover_done = true;
                 // A toolbar action is a local command; no mouse click is sent
                 // to the foreground application and no pointer move is needed.
-                if let Some(answer) = answer {
+                if let Some((window, id)) = update_control {
+                    SendMessageW(window, WM_COMMAND, usize::from(id), 0);
+                } else if let Some(answer) = answer {
                     SendMessageW(confirmation, WM_COMMAND, usize::from(answer), 0);
                     self.apply_pause_answer();
                 } else {

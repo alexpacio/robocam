@@ -14,8 +14,10 @@ mod pointer;
 mod runtime;
 mod sketchup;
 mod startup;
+mod update_install;
+mod updater;
 
-use crate::updates::{self, UpdateResult};
+use crate::updates;
 use crate::{
     cameras::{self, CameraDevice, CameraPreference},
     engine::*,
@@ -135,6 +137,16 @@ fn bar_buttons(show_sketchup: bool) -> impl Iterator<Item = (u16, &'static str)>
         .filter(move |(id, _)| show_sketchup || !matches!(id, 206 | 211))
 }
 
+unsafe fn find_main_window() -> HWND {
+    let mut window = null_mut();
+    loop {
+        window = FindWindowExW(null_mut(), window, wide_raw(APP_CLASS).as_ptr(), null());
+        if window.is_null() || !GetDlgItem(window, ENABLE as i32).is_null() {
+            return window;
+        }
+    }
+}
+
 fn wide(s: &str) -> Vec<u16> {
     crate::i18n::translate(s)
         .encode_utf16()
@@ -250,9 +262,7 @@ struct App {
     smoke_started: Instant,
     was_controlling: bool,
     pending_input: VecDeque<(u64, MouseButton, bool)>,
-    update_receiver: Option<Receiver<UpdateResult>>,
-    manual_update: bool,
-    available_release: Option<(String, String)>,
+    updater: updater::Updater,
     tooltip_text: Vec<Vec<u16>>,
     auto_close: bool,
     desktop_test_stage: Option<(u8, u128)>,
@@ -342,7 +352,7 @@ pub fn run() {
             return;
         }
         if args.iter().any(|s| s == "--request-exit") {
-            let running = FindWindowW(wide_raw(APP_CLASS).as_ptr(), wide_raw("robocam").as_ptr());
+            let running = find_main_window();
             if !running.is_null() {
                 PostMessageW(running, WM_COMMAND, usize::from(QUIT), 0);
             }
@@ -372,9 +382,19 @@ pub fn run() {
             }
             return;
         }
+        if !dry_run {
+            let updating = CreateMutexW(null(), 0, wide_raw("Local\\robocam.Updating").as_ptr());
+            let busy = GetLastError() == ERROR_ALREADY_EXISTS;
+            if !updating.is_null() {
+                CloseHandle(updating);
+            }
+            if busy {
+                return;
+            }
+        }
         let single = CreateMutexW(null(), 0, wide("Local\\robocam.SingleInstance").as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS && !dry_run {
-            let previous = FindWindowW(wide(APP_CLASS).as_ptr(), wide("robocam").as_ptr());
+            let previous = find_main_window();
             if !previous.is_null() {
                 ShowWindow(previous, SW_RESTORE);
                 SetForegroundWindow(previous);
@@ -492,9 +512,7 @@ pub fn run() {
             was_controlling: false,
             pending_input: VecDeque::new(),
             click_cursor: click_feedback::ClickCursor::default(),
-            update_receiver: None,
-            manual_update: false,
-            available_release: None,
+            updater: updater::Updater::default(),
             tooltip_text: Vec::new(),
             auto_close,
             desktop_test_stage: desktop_test.then_some((0, 0)),
@@ -553,14 +571,15 @@ pub fn run() {
             let _ = opencv::core::set_num_threads(1);
         }
         app.enabled = argument("--capture-ui").is_some()
-            || (app.config.startup_enabled()
+            || ((app.config.startup_enabled() || args.iter().any(|arg| arg == "--resume-clicks"))
                 && !dry_run
                 && !args.iter().any(|arg| arg == "--paused"));
         if !dry_run {
             app.start_camera();
         }
-        if app.config.check_updates && !dry_run {
-            app.update_receiver = Some(updates::check_for_updates(env!("CARGO_PKG_VERSION")));
+        app.updater.result = argument("--update-result").map(std::path::PathBuf::from);
+        if app.config.check_updates && !dry_run && app.updater.result.is_none() {
+            app.updater.check(hwnd, false);
         }
         let minimized = args.iter().any(|s| s == "--minimized") || app.config.minimized_at_startup;
         ShowWindow(
@@ -577,6 +596,7 @@ pub fn run() {
         }
         if auto_close {
             app.verify_bar_lifecycle();
+            updater::verify(hwnd);
         }
         if dry_run && !auto_close {
             // Override a launcher's inherited hidden STARTUPINFO after the
@@ -603,7 +623,7 @@ pub fn run() {
         }
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            if messages::route(&msg) {
+            if messages::route(&msg) || updater::route(&msg) {
                 continue;
             }
             if (!app.options.is_null() && IsDialogMessageW(app.options, &msg) != 0)
@@ -1717,7 +1737,27 @@ impl App {
         if self.desktop_test_stage.is_some() {
             self.verify_desktop_transition();
         }
-        self.poll_updates();
+        if let Some(installer) = self.updater.poll(self.hwnd) {
+            match update_install::launch(
+                installer,
+                self.enabled,
+                self.full_paused,
+                IsWindowVisible(self.hwnd) == 0,
+            ) {
+                Ok(directory) => self.updater.wait_for_helper(directory),
+                Err(error) => self.updater.error(self.hwnd, &error),
+            }
+        }
+        if self.updater.ready_to_exit(
+            self.hwnd,
+            self.enabled,
+            self.full_paused,
+            IsWindowVisible(self.hwnd) == 0,
+        ) {
+            self.release_all();
+            self.destroy_owned(self.hwnd);
+            return;
+        }
         self.poll_camera_discovery();
         self.poll_zoom_range();
         let event = self.camera.as_ref().and_then(|camera| camera.try_recv());
@@ -2485,21 +2525,7 @@ impl App {
                 if self.dry_run {
                     return;
                 }
-                if let Some((version, url)) = &self.available_release {
-                    messages::show_releases(
-                        self.hwnd,
-                        &format!("robocam {version} is available.\n\n{url}"),
-                        url,
-                    );
-                } else {
-                    // An explicit request also subscribes to an in-flight
-                    // startup check instead of silently doing nothing.
-                    self.manual_update = true;
-                    if self.update_receiver.is_none() {
-                        self.update_receiver =
-                            Some(updates::check_for_updates(env!("CARGO_PKG_VERSION")));
-                    }
-                }
+                self.updater.check(self.hwnd, true);
             }
             QUIT => {
                 self.release_all();
@@ -3517,35 +3543,5 @@ impl App {
             set_text(status, label);
         }
         EnableWindow(GetDlgItem(self.wizard, NEXT as i32), i32::from(ready));
-    }
-
-    unsafe fn poll_updates(&mut self) {
-        let Some(result) = self
-            .update_receiver
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        else {
-            return;
-        };
-        self.update_receiver = None;
-        let description = match result {
-            UpdateResult::NewRelease { version, url } => {
-                let description = format!("robocam {version} is available.\n\n{url}");
-                set_text(self.hwnd, &format!("robocam — update {version} available"));
-                self.available_release = Some((version, url));
-                description
-            }
-            UpdateResult::Current => "You are running the latest published version.".into(),
-            UpdateResult::NotPublished => "No robocam release has been published yet.".into(),
-            UpdateResult::Failed(error) => format!("Could not check for updates: {error}"),
-        };
-        if self.manual_update {
-            self.manual_update = false;
-            let url = self
-                .available_release
-                .as_ref()
-                .map_or(updates::RELEASES_URL, |(_, url)| url.as_str());
-            messages::show_releases(self.hwnd, &description, url);
-        }
     }
 }

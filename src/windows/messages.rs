@@ -38,36 +38,20 @@ pub(super) unsafe fn confirm_pause(owner: HWND, target: bool) {
         } else {
             "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained."
         },
-        None,
         Some(target),
     );
 }
 
 struct Notice {
     font: HFONT,
-    release_url: Option<String>,
     pause_target: Option<bool>,
 }
 
 pub(super) unsafe fn show(owner: HWND, content: &str) {
-    show_notice(owner, content, None, None);
+    show_notice(owner, content, None);
 }
 
-pub(super) unsafe fn show_releases(owner: HWND, content: &str, url: &str) {
-    show_notice(
-        owner,
-        &format!("{content}\n\nGitHub Releases: alexpacio/robocam"),
-        Some(url),
-        None,
-    );
-}
-
-unsafe fn show_notice(
-    owner: HWND,
-    content: &str,
-    release_url: Option<&str>,
-    pause_target: Option<bool>,
-) {
+unsafe fn show_notice(owner: HWND, content: &str, pause_target: Option<bool>) {
     let class_name = wide_raw(CLASS);
     let instance = GetModuleHandleW(null());
     let class = WNDCLASSW {
@@ -160,22 +144,6 @@ unsafe fn show_notice(
             null(),
         )
     });
-    let release_button = release_url.map(|_| {
-        CreateWindowExW(
-            0,
-            wide_raw("BUTTON").as_ptr(),
-            wide("Open GitHub Releases").as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            scale(16, dpi),
-            scale(height - 76, dpi),
-            scale(270, dpi),
-            scale(28, dpi),
-            window,
-            3usize as HMENU,
-            instance,
-            null(),
-        )
-    });
     let font = CreateFontW(
         -scale(14, dpi),
         0,
@@ -192,20 +160,13 @@ unsafe fn show_notice(
         DEFAULT_PITCH as u32,
         wide_raw("Segoe UI").as_ptr(),
     );
-    let notice = Box::new(Notice {
-        font,
-        release_url: release_url.map(str::to_owned),
-        pause_target,
-    });
+    let notice = Box::new(Notice { font, pause_target });
     SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(notice) as isize);
     SendMessageW(field, WM_SETFONT, font as usize, 1);
     SendMessageW(button, WM_SETFONT, font as usize, 1);
     if let Some(cancel) = cancel {
         SendMessageW(cancel, WM_SETFONT, font as usize, 1);
         PAUSE_WINDOW.with(|handle| handle.set(window));
-    }
-    if let Some(button) = release_button {
-        SendMessageW(button, WM_SETFONT, font as usize, 1);
     }
     placement::ensure(window);
     ShowWindow(window, SW_SHOW);
@@ -225,32 +186,6 @@ pub(super) unsafe fn route(msg: &MSG) -> bool {
 
 unsafe extern "system" fn notice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_COMMAND if wp == 3 => {
-            // Copy the URL before ShellExecute, which can pump native messages.
-            // The user may close this modeless notice while the browser opens.
-            let notice = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Notice;
-            let url = notice
-                .as_ref()
-                .and_then(|notice| notice.release_url.as_deref())
-                .map(wide_raw);
-            if let Some(url) = url {
-                let result = ShellExecuteW(
-                    hwnd,
-                    wide_raw("open").as_ptr(),
-                    url.as_ptr(),
-                    null(),
-                    null(),
-                    SW_SHOWNORMAL,
-                );
-                if result as usize <= 32 && IsWindow(hwnd) != 0 {
-                    set_text(
-                        GetDlgItem(hwnd, 100),
-                        "Could not open your browser. Visit https://github.com/alexpacio/robocam/releases",
-                    );
-                }
-            }
-            0
-        }
         WM_COMMAND if matches!(wp & 0xffff, 1 | 2) && (wp >> 16) == 0 => {
             if wp == 1 {
                 let notice = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Notice;

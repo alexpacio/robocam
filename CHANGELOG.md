@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 - 2026-10-13
+
+- Added in-app Download and install to Check for updates, with a modeless progress
+  window, cancellation, retry and automatic restart. Head control remains active
+  during download and preparation; held input is released before installation.
+- Discover only newer stable GitHub Releases with the exact Windows x64 installer
+  and published SHA-256 checksums. Download over HTTPS, reject missing/duplicate
+  assets, truncated or oversized files and checksum mismatches, and recheck the
+  installer under a read lock before running it.
+- Preserve saved profiles, UI language, login startup and runtime click/movement
+  pause state. Back up the installed application; a failed installation restores
+  the previous files and restarts Robocam, with the error reported in the app.
+  Required Windows restarts are reported without rebooting the computer.
+- Added updater integrity/cancellation tests and CI coverage for failed-install
+  recovery. Updated the README and behavior guide with the in-app update workflow.
+- Upgrade note: 0.6.0 and older only open the Releases page. Install this version
+  once using its installer to enable in-app installation of later releases.
+
 ## 0.6.0 - 2026-10-13
 
 - Moved full movement/click pause from the end of the toolbar to the second button

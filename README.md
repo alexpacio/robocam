@@ -183,11 +183,28 @@ robocam to change the UI language. This is an application-wide preference.
 
 ## Updates and privacy
 
-Check for updates uses [robocam GitHub Releases](https://github.com/alexpacio/robocam/releases)
-through `https://api.github.com/repos/alexpacio/robocam/releases/latest`. Stable tags
-are compared with the installed version. Open GitHub Releases opens the selected
-release page, or the releases list when no update is available. No executable is
-automatically downloaded or installed. Camera images are never uploaded.
+Open **Tools > Check for updates**, then **Download and install** when a newer
+version is available. Robocam downloads the Windows installer, verifies its
+published SHA-256 checksum, installs it and restarts automatically. There is no
+browser download or separate installer wizard to complete. Head control stays
+active during download and preparation; **Cancel** stops before installation.
+
+The optional startup check also offers newer stable
+[GitHub Releases](https://github.com/alexpacio/robocam/releases), using
+`https://api.github.com/repos/alexpacio/robocam/releases/latest` and semantic version
+comparison. Installation starts only after choosing **Download and install**.
+Drafts, prereleases, older versions and releases without the expected installer
+and checksum assets are ignored or reported as unavailable.
+
+Saved profiles, language, login startup and the current pause state are preserved.
+Held input is released before shutdown. If installation fails, the updater attempts
+to restore the previous application and settings, restarts it and displays the error.
+A required Windows restart is reported; Robocam never reboots the PC automatically.
+Downloads, recovery copies and installation logs are kept under
+`%ProgramFiles%\robocam-update-cache` for troubleshooting. Camera images are never uploaded.
+
+**Upgrading from 0.6.0 or older:** install 0.7.0 once from Releases. Those older
+versions do not contain the installer updater; later releases can be installed in-app.
 
 ## Build
 

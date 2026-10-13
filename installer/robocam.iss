@@ -1,6 +1,6 @@
 ; Run scripts\package.ps1 to stage the application and compile this installer.
 #ifndef AppVersion
-  #define AppVersion "0.6.0"
+  #define AppVersion "0.7.0"
 #endif
 #ifndef SourceDir
   #error SourceDir must name the staged application directory
@@ -50,9 +50,20 @@ Name: "{userprograms}\robocam\robocam"; Filename: "{app}\robocam.exe"; WorkingDi
 Name: "{userdesktop}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Flags: runhidden waituntilterminated runascurrentuser
-Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Flags: runhidden waituntilterminated runascurrentuser
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
 Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; RunOnceId: "RemoveStartupTask"; Flags: runhidden waituntilterminated
+
+[Code]
+function NotUpdating: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/ROBOCAMUPDATE=1') = 0 then
+      Result := False;
+end;

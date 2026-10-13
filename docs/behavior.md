@@ -150,3 +150,35 @@ capture camera images.
 
 UI language is selected in General settings and saved application-wide; it takes
 effect at the next launch. SketchUp visibility and click feedback are per-profile.
+
+## In-app updates
+
+The startup preference enables release checks, not unattended installation. Tools >
+Check for updates opens a modeless panel. Download and install authorizes the full
+download/install/restart sequence; its buttons also accept local head dwell while
+ordinary desktop clicks are paused. Network work runs off the UI thread. Cancel
+discards the pending download or cancels helper preparation while leaving Robocam running.
+
+Only exact `vX.Y.Z` stable releases newer than the running package are eligible.
+The installer and SHA256SUMS URLs must match this repository and tag. HTTPS is
+required through redirects. Downloads are bounded by the published size (at most
+128 MiB), checked for completeness and hashed before renaming the partial file.
+The independent helper rechecks SHA-256 while holding a read-only sharing lock.
+Its script, job and installer are staged outside the installed directory, under
+Program Files, so the installer can replace the running application's files.
+
+The helper prepares a recovery copy and signals readiness before the GUI releases
+held input and exits. It waits for that process to finish, snapshots saved settings,
+then runs the published installer silently into the current installation directory.
+`/ROBOCAMUPDATE=1` preserves the existing startup task; `/NORESTART` prevents a
+Windows reboot. See the [Inno Setup command-line documentation](https://jrsoftware.org/ishelp/topic_setupcmdline.htm).
+The helper restores previous files/settings on failure and restarts with the prior
+click/full-pause and visibility state. A process-matched diagnostic heartbeat verifies
+the restart; result.json and install.log retain the outcome. Recovery is best effort
+if Windows refuses file access; an error is reported rather than claiming success.
+
+Run `scripts/test-update-helper.ps1` in Windows PowerShell to test checksum rejection,
+pre-install cancellation and rollback/restart after a deliberately failing fixture
+installer. These tests use disposable programs and profiles, not the installed app.
+Release acceptance additionally requires an older updater-enabled build to discover
+the published newer installer, download it, upgrade and restart with settings intact.
