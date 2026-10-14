@@ -23,6 +23,15 @@ function Write-Json([string]$Path, $Value) {
 function Check-Cancel {
     if (Test-Path -LiteralPath $cancelPath) { throw 'Update cancelled.' }
 }
+function Get-ApplicationVersion([string]$Path) {
+    # Compare numeric Windows resources with the release's X.Y.Z version.
+    # Localized/display version strings are not installation identity.
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    if ($info.ProductPrivatePart -ne 0) {
+        throw 'Application Windows product revision must be zero.'
+    }
+    return ('{0}.{1}.{2}' -f $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart)
+}
 try {
     $job = Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($job.to_version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or
@@ -30,7 +39,7 @@ try {
     $executable = [IO.Path]::GetFullPath($job.executable)
     $installDirectory = Split-Path -Parent $executable
     if ([IO.Path]::GetFileName($executable) -ne 'robocam.exe' -or
-        (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $job.from_version) { throw 'The installed application changed.' }
+        (Get-ApplicationVersion $executable) -ne $job.from_version) { throw 'The installed application changed.' }
     $installer = [IO.Path]::GetFullPath($job.installer)
     if ((Split-Path -Parent $installer) -ne $root -or
         [IO.Path]::GetFileName($installer) -cne ('robocam-' + $job.to_version + '-windows-x64-setup.exe')) { throw 'Invalid installer path.' }
@@ -80,7 +89,7 @@ try {
     $setup.WaitForExit()
     $outcome.installer_exit = $setup.ExitCode
     if ($setup.ExitCode -ne 0 -and $setup.ExitCode -ne 3010) { throw ('Installer failed with exit code ' + $setup.ExitCode + '.') }
-    if ($setup.ExitCode -eq 0 -and (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion -ne $job.to_version) { throw 'The installed version does not match the release.' }
+    if ($setup.ExitCode -eq 0 -and (Get-ApplicationVersion $executable) -ne $job.to_version) { throw 'The installed version does not match the release.' }
     if ($settingsHash -and (Get-FileHash -LiteralPath $job.settings).Hash -ne $settingsHash) { throw 'Saved settings changed during installation.' }
     $outcome.settings_preserved = $true
     $outcome.state = if ($setup.ExitCode -eq 3010) { 'restart_required' } else { 'installed' }
@@ -111,7 +120,7 @@ if ($parentExited) {
         $quoted = @($arguments | ForEach-Object { '"' + $_ + '"' })
         $app = Start-Process -FilePath $executable -ArgumentList $quoted -WorkingDirectory $installDirectory -WindowStyle Hidden -PassThru
         $outcome.restart_pid = $app.Id
-        $expectedVersion = if ($outcome.state -eq 'installed') { $job.to_version } else { (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion }
+        $expectedVersion = if ($outcome.state -eq 'installed') { $job.to_version } else { Get-ApplicationVersion $executable }
         $ready = $false
         for ($attempt = 0; $attempt -lt 80; $attempt++) {
             if ($app.HasExited) { throw 'Robocam exited after the update.' }

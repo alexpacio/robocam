@@ -55,6 +55,12 @@ disclaimer under **Tools > Licenses and disclaimers** and in Help and about;
 **Tools > Open dependency licenses** opens the local `licenses` collection.
 English license texts remain verbatim when the interface language is Italian.
 
+Application and installer Windows version metadata use `X.Y.Z.0`. Packaging
+checks both the text and numeric resources. The updater derives `X.Y.Z` from the
+numeric product version resource for installation and restart verification;
+it rejects a nonzero fourth component. Version 1.0.0 requires a direct installer
+upgrade from 0.x, whose updater helpers compare display-version strings.
+
 `licenses/DEPENDENCIES.md` links to the preserved OpenCV, IPP, face-model and
 installer notices. `licenses/RUST_DEPENDENCIES.md` and `rust-dependencies.json`
 record all resolved crate versions, declared licenses, attribution, upstream

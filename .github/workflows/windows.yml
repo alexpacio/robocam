@@ -47,7 +47,7 @@ jobs:
       - name: Test and build
         shell: pwsh
         run: ./scripts/build.ps1 -Configuration Release
-      - name: Verify update cancellation and failed-install recovery
+      - name: Verify updater installation, cancellation and recovery
         shell: powershell
         run: ./scripts/test-update-helper.ps1
       - name: Package installer and portable application

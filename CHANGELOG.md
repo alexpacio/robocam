@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0 - 2026-10-14
+
+- Fixed automatic updates rolling back a successful installation because Windows
+  metadata reported `X.Y.Z.0` while the updater expected `X.Y.Z`.
+- Verify installation and restart using numeric Windows product version resources
+  instead of display-version strings. Windows metadata remains `X.Y.Z.0`;
+  packaging checks the numeric and text representations against Cargo.
+- Reject nonzero Windows product revisions and genuinely mismatched versions,
+  while retaining checksum validation, rollback and saved settings preservation.
+- Added successful-install/restart, wrong-version and nonzero-revision coverage
+  alongside cancellation, checksum rejection and failed-install recovery tests.
+- Breaking upgrade: install 1.0.0 once with its published installer when upgrading
+  from 0.x. Older installed helpers cannot handle the four-component display
+  metadata; no compatibility shim is provided. Later updates use the new helper.
+
 ## 0.8.1 - 2026-10-14
 
 - Relicensed Robocam's original code under Apache License 2.0 to allow broad

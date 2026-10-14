@@ -217,6 +217,11 @@ Downloads, recovery copies and installation logs are kept under
 **Upgrading from 0.6.0 or older:** install 0.7.0 or later once from Releases. Those older
 versions do not contain the installer updater; later releases can be installed in-app.
 
+**Upgrading from 0.x to 1.0.0:** install 1.0.0 once using its published installer.
+This is a breaking updater transition: older helpers compare display-version
+strings and reject the four-component Windows metadata. Starting with 1.0.0,
+the updater verifies numeric version resources instead.
+
 ## Build
 
 Install Rust x64 MSVC, Visual Studio C++ build tools with Windows SDK, LLVM and 7-Zip.

@@ -13,6 +13,14 @@ if ($manifest -notmatch '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { throw
 $version = $Matches[1]
 $releaseExecutable = Join-Path $repository 'target\release\robocam.exe'
 if (!(Test-Path -LiteralPath $releaseExecutable)) { throw "Release executable missing: $releaseExecutable" }
+$versionInfo = (Get-Item -LiteralPath $releaseExecutable).VersionInfo
+if ($versionInfo.ProductVersion -cne "$version.0") {
+    throw 'Application ProductVersion text must match X.Y.Z.0.'
+}
+$numericProductVersion = '{0}.{1}.{2}.{3}' -f $versionInfo.ProductMajorPart, $versionInfo.ProductMinorPart, $versionInfo.ProductBuildPart, $versionInfo.ProductPrivatePart
+if ($numericProductVersion -ne "$version.0" -or $versionInfo.FileVersion -ne "$version.0") {
+    throw 'Application Windows version resources must match X.Y.Z.0.'
+}
 $distribution = Join-Path $repository 'dist'
 $stage = Join-Path $distribution "robocam-$version-windows-x64"
 $sourceStage = Join-Path $distribution "robocam-$version-source"

@@ -1,6 +1,6 @@
 ; Run scripts\package.ps1 to stage the application and compile this installer.
 #ifndef AppVersion
-  #define AppVersion "0.8.1"
+  #define AppVersion "1.0.0"
 #endif
 #ifndef SourceDir
   #error SourceDir must name the staged application directory
