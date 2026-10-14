@@ -1,15 +1,5 @@
-//! A premultiplied-alpha image of the user's standard Windows arrow.
-//! Upload the complete surface explicitly; WS_EX_TRANSPARENT/WM_PAINT can defer
-//! painting until after a short click has already ended.
+//! Premultiplied overlay bitmap, retaining the user's standard arrow shape and hotspot.
 use super::*;
-
-pub(super) const ACTIVE: isize = 1 << 31;
-pub(super) const NATIVE_VISIBLE: isize = 1 << 30;
-
-pub(super) unsafe fn set_active(hwnd: HWND, active: bool) {
-    let value = GetWindowLongPtrW(hwnd, GWLP_USERDATA) & !ACTIVE;
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, value | if active { ACTIVE } else { 0 });
-}
 
 pub(super) struct Surface {
     pub dc: HDC,
@@ -82,6 +72,38 @@ impl Surface {
         }
         std::fs::write(path, bmp).map_err(|e| e.to_string())
     }
+
+    /// Supply the complete premultiplied-alpha surface before showing it.
+    pub unsafe fn present(&self, hwnd: HWND, hotspot: POINT) -> bool {
+        let mut position: POINT = zeroed();
+        if GetCursorPos(&mut position) == 0 {
+            return false;
+        }
+        position.x -= hotspot.x;
+        position.y -= hotspot.y;
+        let size = SIZE {
+            cx: self.width,
+            cy: self.height,
+        };
+        let origin = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        UpdateLayeredWindow(
+            hwnd,
+            null_mut(),
+            &position,
+            &size,
+            self.dc,
+            &origin,
+            0,
+            &blend,
+            ULW_ALPHA,
+        ) != 0
+    }
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -111,14 +133,19 @@ fn recolor(alpha: &[u8], width: usize, height: usize, border: usize) -> Vec<u32>
                     (x.saturating_sub(border)..=(x + border).min(width - 1))
                         .any(|nx| alpha[ny * width + nx] < 128)
                 });
-            let shade = if edge { 150 * u32::from(*a) / 255 } else { 0 };
-            (u32::from(*a) << 24) | (shade << 16) | (shade << 8) | shade
+            let [r, g, b] = drawing::CONTRAST_YELLOW.map(|c| {
+                if edge {
+                    u32::from(c) * u32::from(*a) / 255
+                } else {
+                    0
+                }
+            });
+            (u32::from(*a) << 24) | (r << 16) | (g << 8) | b
         })
         .collect()
 }
 
-pub(super) unsafe fn arrow(dpi: u32) -> Option<(Surface, POINT)> {
-    let cursor = LoadCursorW(null_mut(), IDC_ARROW);
+pub(super) unsafe fn native_image(cursor: HCURSOR, background: u32) -> Option<(Surface, POINT)> {
     let mut info: ICONINFO = zeroed();
     if cursor.is_null() || GetIconInfo(cursor, &mut info) == 0 {
         return None;
@@ -151,14 +178,12 @@ pub(super) unsafe fn arrow(dpi: u32) -> Option<(Surface, POINT)> {
     if original_height == 0 {
         return None;
     }
-    let width = bitmap.bmWidth.max(GetSystemMetricsForDpi(SM_CXCURSOR, dpi));
-    let height = original_height.max(GetSystemMetricsForDpi(SM_CYCURSOR, dpi));
-    let mut black = Surface::new(width, height)?;
-    let mut white = Surface::new(width, height)?;
-    black.data_mut().fill(0xff000000);
-    white.data_mut().fill(0xffffffff);
+    let width = bitmap.bmWidth;
+    let height = original_height;
+    let mut image = Surface::new(width, height)?;
+    image.data_mut().fill(background);
     if DrawIconEx(
-        black.dc,
+        image.dc,
         0,
         0,
         cursor,
@@ -168,21 +193,24 @@ pub(super) unsafe fn arrow(dpi: u32) -> Option<(Surface, POINT)> {
         null_mut(),
         DI_NORMAL,
     ) == 0
-        || DrawIconEx(
-            white.dc,
-            0,
-            0,
-            cursor,
-            width,
-            height,
-            0,
-            null_mut(),
-            DI_NORMAL,
-        ) == 0
     {
         return None;
     }
     GdiFlush();
+    Some((
+        image,
+        POINT {
+            x: info.xHotspot as i32,
+            y: info.yHotspot as i32,
+        },
+    ))
+}
+
+pub(super) unsafe fn arrow() -> Option<(Surface, POINT)> {
+    let cursor = LoadCursorW(null_mut(), IDC_ARROW);
+    let (mut black, hotspot) = native_image(cursor, 0xff000000)?;
+    let (white, _) = native_image(cursor, 0xffffffff)?;
+    let (width, height) = (black.width, black.height);
     // Two backgrounds recover coverage even for legacy monochrome cursors,
     // whose DrawIconEx output does not have a usable alpha channel.
     let alpha: Vec<u8> = black
@@ -205,78 +233,17 @@ pub(super) unsafe fn arrow(dpi: u32) -> Option<(Surface, POINT)> {
         &alpha,
         width as usize,
         height as usize,
-        scale(1, dpi).max(1) as usize,
+        (width / 32).max(1) as usize,
     );
     black.data_mut().copy_from_slice(&pixels);
-    Some((
-        black,
-        POINT {
-            x: (i64::from(info.xHotspot) * i64::from(width) / i64::from(bitmap.bmWidth)) as i32,
-            y: (i64::from(info.yHotspot) * i64::from(height) / i64::from(original_height)) as i32,
-        },
-    ))
-}
-
-pub(super) unsafe fn show(hwnd: HWND) -> bool {
-    let Some((image, hotspot)) = arrow(GetDpiForWindow(hwnd).max(96)) else {
-        return false;
-    };
-    let mut position: POINT = zeroed();
-    if GetCursorPos(&mut position) == 0 {
-        return false;
-    }
-    position.x -= hotspot.x;
-    position.y -= hotspot.y;
-    let size = SIZE {
-        cx: image.width,
-        cy: image.height,
-    };
-    let origin = POINT { x: 0, y: 0 };
-    let blend = BLENDFUNCTION {
-        BlendOp: AC_SRC_OVER as u8,
-        BlendFlags: 0,
-        SourceConstantAlpha: 255,
-        AlphaFormat: AC_SRC_ALPHA as u8,
-    };
-    if UpdateLayeredWindow(
-        hwnd,
-        null_mut(),
-        &position,
-        &size,
-        image.dc,
-        &origin,
-        0,
-        &blend,
-        ULW_ALPHA,
-    ) == 0
-    {
-        return false;
-    }
-    SetWindowLongPtrW(
-        hwnd,
-        GWLP_USERDATA,
-        (GetWindowLongPtrW(hwnd, GWLP_USERDATA) & (ACTIVE | NATIVE_VISIBLE))
-            | hotspot.x as isize
-            | ((hotspot.y as isize) << 16),
-    );
-    SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
-    // The replacement must have reached the compositor before hiding the real cursor.
-    DwmFlush() >= 0
+    Some((black, hotspot))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn recoloring_preserves_transparency_and_keeps_a_black_body_and_gray_outline() {
+    fn recoloring_preserves_transparency_and_uses_the_toolbar_yellow() {
         let mut alpha = vec![0u8; 49];
         for y in 1..6 {
             for x in 1..6 {
@@ -286,7 +253,7 @@ mod tests {
         let pixels = recolor(&alpha, 7, 7, 1);
         assert_eq!(pixels[0], 0);
         assert_eq!(pixels[3 * 7 + 3], 0xff000000);
-        assert_eq!(pixels[7 + 1], 0xff969696);
+        assert_eq!(pixels[7 + 1], 0xffffe600);
         for (a, pixel) in alpha.iter().zip(pixels) {
             assert_eq!(u32::from(*a), pixel >> 24);
         }

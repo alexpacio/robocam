@@ -214,8 +214,8 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Allow consecutive clicks" => "Consenti clic consecutivi",
         "Fast gesture (fixed second dwell)" => "Gesto rapido (seconda sosta fissa)",
         "Play a sound on click" => "Riproduci un suono al clic",
-        "Black cursor with gray outline during click" => {
-            "Cursore nero con bordo grigio durante il clic"
+        "Black cursor with yellow outline during click" => {
+            "Cursore nero con bordo giallo durante il clic"
         }
         "Show dwell progress by the pointer" => {
             "Mostra avanzamento della sosta vicino al puntatore"

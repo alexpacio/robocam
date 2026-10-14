@@ -91,6 +91,10 @@ The main window is kept inside the available desktop area when moved, resized or
 restored, including after camera/DPI changes. Its title bar cannot be covered by
 the click bar. The robot button at the right end of the toolbar always restores it.
 Keyboard, configuration, setup and help remain available in the main window.
+The main window cannot be resized or maximized manually; it fits the camera preview
+and monitor DPI automatically (100%, 125%, 150%, 200%, etc.), including when moved
+between displays. The bottom status wraps onto multiple lines, and
+the bottom area and window height adapt so the complete message remains visible.
 
 In **Configuration > Click**, **Dwell time** controls the wait before a click;
 **Mouse press duration (0-1000 ms)** controls how long each mouse button press
@@ -98,12 +102,16 @@ lasts, including double/triple and SketchUp clicks. Both are saved per profile.
 Existing profiles keep their previous press timing until edited. Very long presses
 can exceed Windows' double-click interval and be recognized as separate clicks.
 
-Below **Play a sound on click**, enable **Black cursor with gray outline during
-click** to recolor the standard Windows arrow black with a gray outline for the
-complete click action, including gaps in
-double/triple clicks and while dragging. It returns to the normal cursor when the
-action finishes or is cancelled. The arrow retains its native shape and click point.
-Over protected Windows UI that covers the overlay, the normal cursor stays visible.
+Below **Play a sound on click**, enable **Black cursor with yellow outline during
+click**. While a mouse button is held, Robocam draws a black arrow with the same
+**#FFE600** yellow outline as the high-contrast toolbar. It uses the standard Windows
+arrow's shape and hotspot in a transparent, non-interactive overlay. On release
+(including the gaps between double/triple clicks), Windows draws its normal pointer.
+The overlay has its own rendering thread so camera processing does not stall it.
+Windows cursor images, roles and saved preferences are never replaced. Native
+pointer drawing is suppressed only after the overlay has been presented; release,
+cancellation, pause and exit restore it. A separate guard restores visibility if
+the application terminates unexpectedly during a press.
 This option is saved per profile and starts off.
 Zero-duration clicks also have zero-duration cursor feedback. Click sounds use
 eViacam's original audio, embedded in the executable.

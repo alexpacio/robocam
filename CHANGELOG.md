@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.2 - 2026-10-14
+
+- Disabled manual resizing/maximizing of the main window. Status messages now
+  wrap onto multiple lines, and the bottom area and window height adapt to show
+  the complete message without ellipsis, using the current font and monitor DPI.
+- Main-window dimensions now derive from a stable 96-DPI baseline at startup
+  and on monitor/scale changes, including the preview, wrapped status and window
+  borders. Moving back from a smaller monitor restores the intended scaled size.
+- Reworked click feedback as a black/yellow arrow drawn by a dedicated overlay
+  thread, independent of camera/UI processing. Only actual button presses are
+  highlighted; Windows draws its normal cursor between presses. System cursor
+  images, roles and saved preferences are not replaced.
+- Changed the outline to #FFE600, shared with the high-contrast toolbar, and updated
+  the option label. Existing profile preferences remain compatible.
+- Restore native pointer visibility on release, cancellation, pause and shutdown;
+  an independent guard handles unexpected termination during a press.
+- Extended compositor checks to held clicks while the UI thread is blocked,
+  movement, target cursor changes and repeated releases; updated the documentation.
+  Physical display validation on the deployment host is still pending.
+
 ## 0.7.1 - 2026-10-13
 
 - Preserve the main window's live visibility when restarting after an update,

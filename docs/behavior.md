@@ -66,16 +66,32 @@ including the click bar; the reduced work area is only for placing application
 windows. Toolbar buttons run local commands without moving or clicking the pointer
 in the window underneath, and gaps/padding also suppress desktop dwell.
 
-The optional black cursor with gray outline is below click sound in Click settings.
-It lasts from action dispatch through the last release, including multi-click gaps
-and held drag buttons. Cancellation, pause, profile changes and shutdown restore
-the normal cursor. Zero-duration actions do not add an artificial highlight delay.
-The replacement is a transparent, non-activating window; it does not receive clicks
-or change the user's saved Windows cursor scheme. Sound feedback uses the embedded
-original eViacam click audio, with its alternate sound when starting a drag.
-The arrow silhouette and hotspot come from the Windows standard arrow, recolored
-with premultiplied alpha. UpdateLayeredWindow uploads the complete image before
-the native cursor is hidden; feedback no longer depends on deferred WM_PAINT.
+The optional black cursor with yellow outline is below click sound in Click settings.
+Feedback is active only while an injected mouse button is down, including a held
+drag. Pending actions and gaps between multiple clicks leave the Windows pointer
+alone. Cancellation, pause, profile changes and shutdown release held input and
+stop the overlay. There is no additional minimum duration for the highlight.
+
+A dedicated thread owns the unowned, topmost, non-activating, click-through layered
+window, its bitmap and all visibility transitions. It supplies premultiplied alpha
+with UpdateLayeredWindow and follows GetCursorPos independently of the main UI's
+message pump. The standard arrow silhouette, bitmap size and hotspot are retained;
+its border uses the shared toolbar RGB(255, 230, 0) constant. After presentation
+and DwmFlush succeed, MagShowSystemCursor suppresses native drawing only during
+the press. On release the renderer restores native visibility before hiding the
+overlay. It does not call SetSystemCursor, reload a cursor scheme, change cursor
+roles or write cursor preferences. At rest it makes no cursor visibility calls.
+If presentation fails or trusted system UI covers the overlay, feedback falls
+back to the normal pointer until the next press.
+
+A hidden guard receives an armed/disarmed byte through a pipe. If the renderer's
+process exits while armed, pipe closure restores native visibility. Normal shutdown
+waits for the guard before an installer can replace the executable. This is a
+visibility fallback, not a cursor scheme reset. See Microsoft's documentation for
+[layered windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#layered-windows)
+and [MagShowSystemCursor](https://learn.microsoft.com/en-us/windows/win32/api/magnification/nf-magnification-magshowsystemcursor).
+Sound feedback uses the embedded original eViacam click audio, with its alternate
+sound when starting a drag.
 
 SketchUp mode checks the application under the pointer, activates its Select tool
 with Space, then sends a paced left double or triple click at a fixed position.
@@ -110,6 +126,19 @@ are drawn afterwards at the real size. Window and tray icons are loaded from the
 embedded frame for the current DPI and replaced on WM_DPICHANGED. Calibration uses the same fresh-tracking readiness as
 pointer control and pauses movement only during its measurement periods.
 
+The main window is not manually resizable. Its preview dimensions are retained in
+logical pixels at 96 DPI, then scaled by the current monitor DPI. Startup,
+WM_GETDPISCALEDSIZE/WM_DPICHANGED and status updates share the same size calculation;
+window borders and the menu use AdjustWindowRectExForDpi. A monitor's work-area
+constraints never overwrite the logical baseline, so repeated monitor changes do
+not accumulate rounding or preserve a temporary size reduction. The position
+suggested by Windows on a DPI change is retained, subject to topbar/work-area bounds.
+Status text uses native word wrapping;
+its height is measured with the displayed font and available width. On a change
+in line count, the window is sized again from the baseline and measured footer,
+preserving the preview where monitor space permits. Camera fitting and DPI layout
+also account for the measured footer. There is no ellipsis or tooltip-only text.
+
 ## Verification checklist
 
 1. Select a camera, save, restart, then verify that the same device is selected.
@@ -132,21 +161,21 @@ version checks and real OpenCV tracking on synthetic frames. Package smoke tests
 cover native startup and shutdown without input injection. Hardware, target-app
 behavior and monitor combinations also require runtime checks.
 
-The ignored `native_cursor_lifecycle` test requires an interactive Windows desktop;
-it briefly displays feedback without injecting input, checks that it cannot take
-focus or intercept the click target, then restores the cursor (also on test panic).
-
 `--desktop-test --smoke-report <path>` additionally toggles Windows Show Desktop,
 checks that the toolbar remains the actual hit-test target while the main window
 is hidden, restores the desktop and verifies reopening the main window. Run this
 only in an interactive session; it briefly rearranges that session's windows.
 
-`--cursor-test <report.json>` places an owned white test window beneath the pointer,
-shows click feedback, then samples actual compositor pixels for a black body and
-gray outline. It verifies click-through behavior and restoration, and saves a BMP
-of the test area. If protected system UI covers the fixture, the report instead
-checks that the native-cursor fallback is active. It does not move the pointer or
-capture camera images.
+`--cursor-test <report.json>` requires an interactive desktop and an idle physical
+mouse. It injects real presses and drags only into its own white test window, moves
+within that window, then restores the original pointer position. It checks composited
+black/yellow pixels and hotspot position during held clicks with the main thread
+blocked, target cursor changes, repeated presses/releases, click-through behavior,
+focus retention and destruction of the overlay on exit. Standard cursor role images
+must remain unchanged. It saves only its own fixture and overlay. GDI captures do
+not prove that a hardware cursor is visible: physical display checks in Chrome,
+on the desktop and on the deployment machine remain necessary. Stop the normal
+Robocam instance before this test to avoid competing input.
 
 UI language is selected in General settings and saved application-wide; it takes
 effect at the next launch. SketchUp visibility and click feedback are per-profile.

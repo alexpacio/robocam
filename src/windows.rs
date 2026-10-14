@@ -5,6 +5,8 @@ mod camera_options;
 mod capture;
 mod click_feedback;
 mod cursor_image;
+mod cursor_process;
+mod cursor_render;
 mod cursor_test;
 mod desktop_test;
 mod drawing;
@@ -75,6 +77,7 @@ const INPUT_TAG: usize = 0x524F424F;
 const SS_OWNERDRAW: u32 = 13;
 const SS_NOTIFY: u32 = 0x100;
 const SS_LEFT: u32 = 0;
+const SS_NOPREFIX: u32 = 0x0080;
 static PHYSICAL_INPUT: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static IN_CALLBACK: Cell<bool> = const { Cell::new(false) };
@@ -266,7 +269,8 @@ struct App {
     tooltip_text: Vec<Vec<u16>>,
     auto_close: bool,
     desktop_test_stage: Option<(u8, u128)>,
-    camera_fitted: bool,
+    /// Preview dimensions in logical pixels at 96 DPI, never monitor-clamped.
+    main_preview_size: [i32; 2],
     window_dpi: Vec<(HWND, u32)>,
     dpi_fonts: Vec<(u32, HFONT)>,
     logical_children: Vec<(HWND, HWND, [i32; 4])>,
@@ -342,6 +346,10 @@ pub fn run() {
             if result.is_err() || written.is_err() {
                 std::process::exit(1);
             }
+            return;
+        }
+        if args.iter().any(|arg| arg == "--cursor-guardian") {
+            click_feedback::guardian();
             return;
         }
         if let Some(path) = argument("--cursor-test") {
@@ -516,7 +524,7 @@ pub fn run() {
             tooltip_text: Vec::new(),
             auto_close,
             desktop_test_stage: desktop_test.then_some((0, 0)),
-            camera_fitted: false,
+            main_preview_size: [300, 175],
             window_dpi: Vec::new(),
             dpi_fonts: vec![(96, font)],
             logical_children: Vec::new(),
@@ -538,7 +546,7 @@ pub fn run() {
             0,
             class_name.as_ptr(),
             wide("robocam").as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            (WS_OVERLAPPEDWINDOW & !(WS_THICKFRAME | WS_MAXIMIZEBOX)) | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             scale(300, GetDpiForSystem()),
@@ -555,7 +563,7 @@ pub fn run() {
         app.hwnd = hwnd;
         MAIN_WINDOW.with(|window| window.set(hwnd));
         let setup_guard = CallbackGuard::enter().unwrap();
-        app.prepare_window(hwnd, 300, 300);
+        app.remember_dpi(hwnd, GetDpiForWindow(hwnd));
         app.update_window_icons(app.dpi_for(hwnd));
         app.create_main();
         app.create_bar();
@@ -697,6 +705,12 @@ unsafe fn message(hwnd: HWND, text: &str) {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_SYSCOMMAND
+        && MAIN_WINDOW.with(|main| main.get() == hwnd)
+        && matches!((wp & 0xfff0) as u32, SC_SIZE | SC_MAXIMIZE)
+    {
+        return 0;
+    }
     if msg == DEFERRED_PLACEMENT {
         placement::ensure(hwnd);
         return 0;
@@ -803,6 +817,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             | WM_PAINT
             | WM_SIZE
             | WM_GETMINMAXINFO
+            | WM_GETDPISCALEDSIZE
             | WM_DPICHANGED
             | DEFERRED_DPI
             | APPBAR_CALLBACK
@@ -936,6 +951,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 y: scale(300, dpi),
             };
             0
+        }
+        WM_GETDPISCALEDSIZE if hwnd == app.hwnd => {
+            let dpi = (wp as u32).max(96);
+            app.ensure_font(dpi);
+            *(lp as *mut SIZE) = app.main_size_for_dpi(dpi);
+            1
         }
         WM_DPICHANGED => {
             app.change_dpi(hwnd, (wp & 0xffff) as u32, &*(lp as *const RECT));
@@ -1155,6 +1176,10 @@ impl App {
         } else {
             self.window_dpi.push((hwnd, dpi));
         }
+        self.ensure_font(dpi);
+    }
+
+    unsafe fn ensure_font(&mut self, dpi: u32) {
         if !self.dpi_fonts.iter().any(|(value, _)| *value == dpi) {
             let font = CreateFontW(
                 -scale(14, dpi),
@@ -1196,33 +1221,59 @@ impl App {
     }
 
     unsafe fn fit_camera_window(&mut self, width: i32, height: i32) {
-        if self.camera_fitted {
-            return;
+        let size = [width.max(300), height.max(1)];
+        if size != self.main_preview_size {
+            self.main_preview_size = size;
+            self.resize_main(None);
         }
-        self.camera_fitted = true;
-        let dpi = self.dpi_for(self.hwnd);
+    }
+
+    /// Rebuild from logical dimensions, never from the last physical window
+    /// rectangle (which may have been clamped on a smaller monitor).
+    unsafe fn main_size_for_dpi(&self, dpi: u32) -> SIZE {
+        let [width, height] = self.main_preview_size;
+        let client_width = scale(width, dpi);
         let mut bounds = RECT {
-            left: 0,
-            top: 0,
-            right: scale(width.max(300), dpi),
-            bottom: scale(height + 78, dpi),
+            right: client_width,
+            bottom: scale(height + 42, dpi) + self.status_area_height_for_dpi(client_width, dpi),
+            ..zeroed()
         };
         AdjustWindowRectExForDpi(
             &mut bounds,
             GetWindowLongW(self.hwnd, GWL_STYLE) as u32,
-            1,
+            i32::from(!GetMenu(self.hwnd).is_null()),
             GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32,
             dpi,
         );
-        SetWindowPos(
-            self.hwnd,
-            null_mut(),
-            0,
-            0,
-            bounds.right - bounds.left,
-            bounds.bottom - bounds.top,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
+        SIZE {
+            cx: bounds.right - bounds.left,
+            cy: bounds.bottom - bounds.top,
+        }
+    }
+
+    unsafe fn resize_main(&self, suggested: Option<&RECT>) {
+        if IsIconic(self.hwnd) != 0 {
+            return;
+        }
+        let size = self.main_size_for_dpi(self.dpi_for(self.hwnd));
+        let mut current: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut current);
+        if suggested.is_some()
+            || size.cx != current.right - current.left
+            || size.cy != current.bottom - current.top
+        {
+            let position = suggested.unwrap_or(&current);
+            SetWindowPos(
+                self.hwnd,
+                null_mut(),
+                position.left,
+                position.top,
+                size.cx,
+                size.cy,
+                SWP_NOZORDER | SWP_NOACTIVATE | if suggested.is_none() { SWP_NOMOVE } else { 0 },
+            );
+        }
+        self.layout_main();
     }
 
     /// Title bar, taskbar and Alt+Tab use the icon frame drawn for this DPI.
@@ -1263,18 +1314,21 @@ impl App {
                 );
             }
         }
-        SetWindowPos(
-            hwnd,
-            null_mut(),
-            suggested.left,
-            suggested.top,
-            suggested.right - suggested.left,
-            suggested.bottom - suggested.top,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
         if hwnd == self.hwnd {
             self.update_window_icons(dpi);
-            self.layout_main();
+            // Preserve Windows' suggested destination while computing the new
+            // size from the 96-DPI baseline, including the wrapped status text.
+            self.resize_main(Some(suggested));
+        } else {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                suggested.left,
+                suggested.top,
+                suggested.right - suggested.left,
+                suggested.bottom - suggested.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
         if hwnd == self.bar && self.config.profile().bar_position != 4 {
             self.position_bar();
@@ -1383,38 +1437,84 @@ impl App {
             "STATIC",
             "Starting camera…",
             STATUS,
-            SS_LEFT,
+            SS_LEFT | SS_NOPREFIX,
             [5, 220, 275, 35],
         );
-        self.layout_main();
+        self.resize_main(None);
+    }
+
+    /// Measure with the same font, width and wrapping rules as the static label.
+    unsafe fn status_text_height(&self, width: i32) -> i32 {
+        self.status_text_height_for_dpi(width, self.dpi_for(self.hwnd))
+    }
+
+    unsafe fn status_text_height_for_dpi(&self, width: i32, dpi: u32) -> i32 {
+        let label = GetDlgItem(self.hwnd, STATUS as i32);
+        let content = wide_raw(&text(label));
+        let dc = GetDC(label);
+        if dc.is_null() {
+            return scale(20, dpi);
+        }
+        let font = self
+            .dpi_fonts
+            .iter()
+            .find(|(value, _)| *value == dpi)
+            .map_or(self.font, |(_, font)| *font);
+        let previous = SelectObject(dc, font);
+        let mut bounds = RECT {
+            right: width.max(1),
+            ..zeroed()
+        };
+        DrawTextW(
+            dc,
+            content.as_ptr(),
+            -1,
+            &mut bounds,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EXPANDTABS,
+        );
+        SelectObject(dc, previous);
+        ReleaseDC(label, dc);
+        bounds.bottom - bounds.top
+    }
+
+    unsafe fn status_area_height(&self, client_width: i32) -> i32 {
+        self.status_area_height_for_dpi(client_width, self.dpi_for(self.hwnd))
+    }
+
+    unsafe fn status_area_height_for_dpi(&self, client_width: i32, dpi: u32) -> i32 {
+        (self.status_text_height_for_dpi(client_width - scale(10, dpi), dpi) + scale(12, dpi))
+            .max(scale(36, dpi))
     }
 
     unsafe fn layout_main(&self) {
-        if self.hwnd.is_null() {
+        if self.hwnd.is_null() || IsIconic(self.hwnd) != 0 {
             return;
         }
         let dpi = self.dpi_for(self.hwnd);
         let mut r: RECT = zeroed();
         GetClientRect(self.hwnd, &mut r);
+        let footer = self.status_area_height(r.right);
+        let top = scale(42, dpi);
+        let preview_height = (r.bottom - top - footer).max(0);
         MoveWindow(
             GetDlgItem(self.hwnd, PREVIEW as i32),
             0,
-            scale(42, dpi),
+            top,
             r.right,
-            (r.bottom - scale(78, dpi)).max(scale(40, dpi)),
+            preview_height,
             1,
         );
         MoveWindow(
             GetDlgItem(self.hwnd, STATUS as i32),
             scale(5, dpi),
-            (r.bottom - scale(34, dpi)).max(scale(83, dpi)),
-            r.right - scale(10, dpi),
-            scale(32, dpi),
+            top + preview_height + scale(6, dpi),
+            (r.right - scale(10, dpi)).max(1),
+            footer - scale(12, dpi),
             1,
         );
     }
 
-    unsafe fn tooltip(&mut self, parent: HWND, target: HWND, label: &str) {
+    unsafe fn tooltip(&mut self, parent: HWND, target: HWND, label: &str) -> HWND {
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             wide("tooltips_class32").as_ptr(),
@@ -1437,6 +1537,12 @@ impl App {
         info.uId = target as usize;
         info.lpszText = self.tooltip_text.last_mut().unwrap().as_mut_ptr();
         SendMessageW(hwnd, TTM_ADDTOOLW, 0, &info as *const _ as isize);
+        hwnd
+    }
+
+    unsafe fn set_status(&mut self) {
+        set_text(GetDlgItem(self.hwnd, STATUS as i32), &self.status);
+        self.resize_main(None);
     }
 
     unsafe fn create_bar(&mut self) {
@@ -1879,7 +1985,7 @@ impl App {
             self.status = "Physical mouse in use — head control paused".into();
         }
         if self.status != self.last_status {
-            set_text(GetDlgItem(self.hwnd, STATUS as i32), &self.status);
+            self.set_status();
             self.last_status = self.status.clone();
         }
         self.refresh_wizard_tracking();
@@ -2239,6 +2345,108 @@ impl App {
     }
 
     unsafe fn verify_bar_lifecycle(&mut self) {
+        // Exercise size requests without changing the monitor's real DPI. The
+        // target font must not change the currently displayed scale, and a
+        // clamped/suggested physical rectangle must not replace the baseline.
+        let current_dpi = self.dpi_for(self.hwnd);
+        let logical = self.main_preview_size;
+        let mut sizes = Vec::new();
+        for dpi in [96, 120, 144, 192, 144, 96] {
+            self.ensure_font(dpi);
+            let size = self.main_size_for_dpi(dpi);
+            assert!(size.cx > scale(logical[0], dpi));
+            assert!(size.cy >= scale(logical[1] + 78, dpi));
+            assert_eq!(self.dpi_for(self.hwnd), current_dpi);
+            sizes.push((size.cx, size.cy));
+        }
+        assert!(
+            sizes[..4]
+                .windows(2)
+                .all(|s| s[1].0 > s[0].0 && s[1].1 > s[0].1)
+        );
+        assert_eq!(sizes[0], sizes[5]);
+        assert_eq!(sizes[2], sizes[4]);
+        let intended = self.main_size_for_dpi(current_dpi);
+        let mut suggested: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut suggested);
+        suggested.right = suggested.left + intended.cx / 2;
+        suggested.bottom = suggested.top + intended.cy / 2;
+        self.change_dpi(self.hwnd, current_dpi, &suggested);
+        let mut resized: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut resized);
+        assert_eq!(
+            [resized.right - resized.left, resized.bottom - resized.top],
+            [intended.cx, intended.cy]
+        );
+        assert_eq!(self.main_preview_size, logical);
+        assert_eq!(
+            GetWindowLongW(self.hwnd, GWL_STYLE) as u32 & (WS_THICKFRAME | WS_MAXIMIZEBOX),
+            0
+        );
+        let mut fixed_before: RECT = zeroed();
+        let mut fixed_after: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut fixed_before);
+        SendMessageW(self.hwnd, WM_SYSCOMMAND, SC_MAXIMIZE as usize, 0);
+        SendMessageW(self.hwnd, WM_SYSCOMMAND, SC_SIZE as usize, 0);
+        GetWindowRect(self.hwnd, &mut fixed_after);
+        assert_eq!(
+            [
+                fixed_before.left,
+                fixed_before.top,
+                fixed_before.right,
+                fixed_before.bottom
+            ],
+            [
+                fixed_after.left,
+                fixed_after.top,
+                fixed_after.right,
+                fixed_after.bottom
+            ]
+        );
+        let old_status = self.status.clone();
+        self.status = "Movement and clicks paused — use the hotkey or main window button · 30 fps · 100 points".repeat(3);
+        self.set_status();
+        let label = GetDlgItem(self.hwnd, STATUS as i32);
+        assert_eq!(text(label), crate::i18n::translate(&self.status));
+        assert_eq!(GetWindowLongW(label, GWL_STYLE) as u32 & 0xc00f, SS_LEFT);
+        let mut expanded: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut expanded);
+        assert!(expanded.bottom - expanded.top > fixed_after.bottom - fixed_after.top);
+        self.set_status();
+        let mut repeated: RECT = zeroed();
+        GetWindowRect(self.hwnd, &mut repeated);
+        assert_eq!(
+            expanded.bottom - expanded.top,
+            repeated.bottom - repeated.top
+        );
+        let mut client: RECT = zeroed();
+        let mut status_bounds: RECT = zeroed();
+        GetClientRect(self.hwnd, &mut client);
+        GetWindowRect(label, &mut status_bounds);
+        MapWindowPoints(
+            null_mut(),
+            self.hwnd,
+            (&mut status_bounds as *mut RECT).cast(),
+            2,
+        );
+        assert!(
+            status_bounds.left >= 0
+                && status_bounds.top >= 0
+                && status_bounds.right <= client.right
+                && status_bounds.bottom <= client.bottom
+        );
+        assert!(
+            status_bounds.bottom - status_bounds.top
+                >= self.status_text_height(status_bounds.right - status_bounds.left)
+        );
+        assert!(status_bounds.bottom - status_bounds.top > scale(32, self.dpi_for(self.hwnd)));
+        self.status = old_status;
+        self.set_status();
+        GetWindowRect(self.hwnd, &mut repeated);
+        assert_eq!(
+            repeated.bottom - repeated.top,
+            fixed_after.bottom - fixed_after.top
+        );
         assert!(GetWindow(self.bar, GW_OWNER).is_null());
         ShowWindow(self.hwnd, SW_MINIMIZE);
         assert_eq!(
@@ -2346,6 +2554,17 @@ impl App {
         // Confirmation remains usable by head dwell even with clicks paused.
         self.enabled = false;
         self.command(self.hwnd, 212, 0);
+        // This opt-in smoke fixture needs to receive hit tests even when the
+        // test runner cannot take foreground focus from another application.
+        SetWindowPos(
+            messages::pause_window(),
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
         let mut confirm: RECT = zeroed();
         GetWindowRect(GetDlgItem(messages::pause_window(), 1), &mut confirm);
         let centre = (
@@ -2364,7 +2583,16 @@ impl App {
             centre,
             Some(centre),
         );
-        assert!(self.full_paused);
+        assert!(
+            self.full_paused,
+            "confirmation dwell failed: control={}, centre={centre:?}, hit={:?}, confirm={:?}",
+            self.hover_id,
+            WindowFromPoint(POINT {
+                x: centre.0,
+                y: centre.1
+            }),
+            GetDlgItem(messages::pause_window(), 1)
+        );
         assert!(self.pending_input.is_empty());
         assert!(!self.injected.iter().any(|pressed| *pressed));
         let click_actions = self.click_actions;
@@ -2420,16 +2648,13 @@ impl App {
     unsafe fn verify_click_feedback(&mut self) {
         let previous = self.config.profile().black_cursor_on_click;
         self.config.profile_mut().black_cursor_on_click = true;
-        // Keep feedback across multi-click gaps; dry-run never hides the cursor.
+        // Only actual presses are highlighted; gaps and delays stay native.
         for count in 1..=3 {
             self.pending_input
                 .extend(click_sequence(now(), MouseButton::Left, count, 100, 25));
             while let Some((_, button, down)) = self.pending_input.pop_front() {
                 self.button(button, down);
-                assert_eq!(
-                    self.click_cursor.active(),
-                    down || !self.pending_input.is_empty()
-                );
+                assert_eq!(self.click_cursor.active(), down);
             }
             assert!(!self.click_cursor.active());
         }
@@ -2443,7 +2668,7 @@ impl App {
         self.pending_input
             .extend(click_sequence(now() + 40, MouseButton::Left, 2, 100, 25));
         self.update_click_cursor();
-        assert!(self.click_cursor.active());
+        assert!(!self.click_cursor.active());
         self.release_all();
         assert!(!self.click_cursor.active());
         self.config.profile_mut().black_cursor_on_click = false;
@@ -2810,7 +3035,7 @@ impl App {
             1,
             6,
             426,
-            "Black cursor with gray outline during click",
+            "Black cursor with yellow outline during click",
             p.black_cursor_on_click,
         );
         self.edit(
