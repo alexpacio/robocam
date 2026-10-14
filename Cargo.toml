@@ -1,0 +1,34 @@
+[package]
+name = "robocam"
+version = "0.8.0"
+edition = "2024"
+description = "Head-controlled mouse for Windows 11"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Media_DirectShow", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_TaskScheduler", "Win32_UI_Shell"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+opencv = { version = "0.101.1", default-features = false, features = ["clang-runtime", "imgproc", "objdetect", "video", "videoio"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell",
+  "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_System_Registry",
+  "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation",
+  "Win32_System_Pipes", "Win32_System_IO",
+  "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_Media_Audio", "Win32_UI_Magnification"
+  , "Win32_System_Diagnostics_Debug", "Win32_Security_Authorization"
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
