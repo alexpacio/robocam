@@ -16,7 +16,7 @@ fn bounded(mut rect: RECT, area: RECT) -> RECT {
     rect
 }
 
-fn avoid_bar(rect: RECT, area: RECT, bar: Option<RECT>) -> RECT {
+pub(super) fn avoid_bar(rect: RECT, area: RECT, bar: Option<RECT>) -> RECT {
     let rect = bounded(rect, area);
     let Some(bar) = bar else {
         return rect;

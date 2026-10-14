@@ -88,7 +88,6 @@ impl App {
             self.config.profile().click.press_ms,
             GetDoubleClickTime(),
         ));
-        self.update_click_cursor();
         self.play_click_sound(false);
     }
 }

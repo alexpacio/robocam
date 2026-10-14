@@ -67,31 +67,55 @@ windows. Toolbar buttons run local commands without moving or clicking the point
 in the window underneath, and gaps/padding also suppress desktop dwell.
 
 The optional black cursor with yellow outline is below click sound in Click settings.
-Feedback is active only while an injected mouse button is down, including a held
-drag. Pending actions and gaps between multiple clicks leave the Windows pointer
-alone. Cancellation, pause, profile changes and shutdown release held input and
-stop the overlay. There is no additional minimum duration for the highlight.
+A press starts it and it lasts until the last release of the same click, so the
+gaps of a double/triple click and a held drag stay highlighted. It also lasts at
+least 500 ms from the latest press, so a click with a 0 ms press duration is
+visible. A pending action that has not pressed a button yet leaves the pointer
+alone. Cancellation, pause and profile changes release held input and end the
+highlight after that minimum; disabling the option and shutdown end it at once.
 
-A dedicated thread owns the unowned, topmost, non-activating, click-through layered
-window, its bitmap and all visibility transitions. It supplies premultiplied alpha
-with UpdateLayeredWindow and follows GetCursorPos independently of the main UI's
-message pump. The standard arrow silhouette, bitmap size and hotspot are retained;
-its border uses the shared toolbar RGB(255, 230, 0) constant. After presentation
-and DwmFlush succeed, MagShowSystemCursor suppresses native drawing only during
-the press. On release the renderer restores native visibility before hiding the
-overlay. It does not call SetSystemCursor, reload a cursor scheme, change cursor
-roles or write cursor preferences. At rest it makes no cursor visibility calls.
-If presentation fails or trusted system UI covers the overlay, feedback falls
-back to the normal pointer until the next press.
+Feedback changes the images Windows itself draws instead of hiding the pointer and
+painting a substitute. Earlier versions hid it with MagShowSystemCursor and drew a
+topmost overlay; wherever that overlay was not visible on the physical display, no
+pointer was left. 1.0.1 builds swapped in a copy of `LoadCursorW(IDC_ARROW)`; with
+the accessibility pointer style that is a 32 px monochrome base image, and on a
+computer whose graphics card draws the pointer (a hardware pointer) the display
+never showed it.
 
-A hidden guard receives an armed/disarmed byte through a pipe. If the renderer's
-process exits while armed, pipe closure restores native visibility. Normal shutdown
-waits for the guard before an installer can replace the executable. This is a
-visibility fallback, not a cursor scheme reset. See Microsoft's documentation for
-[layered windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#layered-windows)
-and [MagShowSystemCursor](https://learn.microsoft.com/en-us/windows/win32/api/magnification/nf-magnification-magshowsystemcursor).
-Sound feedback uses the embedded click audio, with its alternate
-sound when starting a drag.
+The highlight therefore starts from the file Windows draws: with the custom-colour
+accessibility style (`HKCU\Software\Microsoft\Accessibility\CursorType` = 6) the
+per-user copy `%LOCALAPPDATA%\Microsoft\Windows\Cursors\arrow_eoa.cur`, otherwise
+the scheme's `HKCU\Control Panel\Cursors\Arrow` file, or the system arrow when the
+scheme names none. Its size is `CursorBaseSize` scaled to the DPI of the monitor
+under the pointer (for example 48 at 130 DPI gives 65 px), clamped to 32-256;
+`SM_CXCURSOR` keeps reporting the 32 px base and is not used. A worker thread loads
+the arrow at that size, recovers its coverage by drawing it over black and over
+white, and maps the part meeting transparency (the outline, light or dark) to the
+shared toolbar RGB(255, 230, 0) constant and the fill to black. Shape, size,
+hotspot, outline width and edge antialiasing are kept. The result is written as a
+single-image 32bpp `.cur` to `%LOCALAPPDATA%\robocam\cursor\highlight-<size>.cur`
+and rebuilt only when the source file, its modification time or the size changes;
+the file is prepared when the option is enabled, so a press only loads it.
+On press, the file is loaded with `LoadImageW(LR_LOADFROMFILE)` once for each of
+the 14 standard OCR_* roles and applied with SetSystemCursor, so links, text and
+resize targets also show the arrow; application-defined cursors are not roles and
+keep their look. Release calls SystemParametersInfo(SPI_SETCURSORS),
+which reloads the user's saved scheme, size and colour from the registry. The worker
+applies every press, even one already released when it is received, and reloads
+the scheme once the minimum time has passed; the camera/UI thread never waits. SetSystemCursor changes are
+not persisted, so signing out always restores the scheme; it also discards other
+applications' unsaved SetSystemCursor changes.
+
+A hidden guard process receives an armed/disarmed byte through a pipe and is armed
+before any role is replaced. If Robocam exits while armed, pipe closure makes it
+reload the scheme. The worker and guard start once the option is enabled, so the
+first press is not delayed by a process launch; disabling the option stops both.
+Normal shutdown waits for the guard before an installer can replace the executable.
+See Microsoft's documentation for
+[SetSystemCursor](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setsystemcursor)
+and [SPI_SETCURSORS](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-systemparametersinfow).
+Sound feedback uses the embedded click audio, with its alternate sound when
+starting a drag.
 
 SketchUp mode checks the application under the pointer, activates its Select tool
 with Space, then sends a paced left double or triple click at a fixed position.
@@ -112,10 +136,48 @@ task for the current user. Runtime priority is Realtime and is rechecked each se
 OpenCV internal parallelism is limited to one thread. Realtime scheduling does not
 guarantee responsiveness when camera drivers or other hardware stall.
 
+A watchdog runs every 2 seconds on the UI thread. The camera thread fingerprints
+every image (every 16th byte); a live sensor's noise changes it on every frame, so
+an unchanged fingerprint for 2 seconds means the driver or capture pipeline is
+repeating one image. The watchdog restarts the camera through the normal start
+path, which releases held buttons, when the image is frozen, no frame arrives for
+2 seconds (15 seconds for a camera still opening), or the worker reports an error
+or stops. Repeated restarts wait 0, 2, 5, 15 and then 30 seconds after the previous
+one; 10 seconds of healthy frames reset the sequence. Restarts are deferred while
+Configuration is open (the driver's property dialog can pause frames) and during
+calibration. The guard thread also releases a ClipCursor confinement smaller than
+the virtual desktop while head control is active.
+
+The diagnostics report includes `watchdog` (camera restarts and reasons, unchanged
+image time, last frame age, per-second median tracking motion, the current stall
+and the last five stall episodes) and `desktop_guard` (windows moved from under the
+bar, released confinements). A stall episode lasts at least one second and is
+either `face_lost` (face detection enabled, tracking still valid, no face found)
+or `frozen_image`; it records its duration, median motion and the clicks sent
+during it. With *Stop pointer when face is not detected* off, a `face_lost`
+episode with near-zero motion on changing images means tracking stalled on a live
+image; tracking itself is unchanged by the watchdog.
+
 The toolbar is a Shell AppBar. Top/bottom docking spans monitor width and reserves
 desktop work area; buttons start at the left. It stays visible through Show Desktop,
-Peek and minimization; only application shutdown removes its reservation. The main
-window minimizes to the tray and can be restored by the robot button
+Peek and minimization; only application shutdown removes its reservation.
+
+A desktop guard thread keeps other applications' windows out of the docked bar.
+Out-of-context WinEvent hooks for window show, foreground and move/size end mark a
+top-level window to check 150 ms later; a 2-second thread timer sweeps every
+top-level window as well. A window is eligible when it is visible, not cloaked,
+minimized, maximized, fullscreen, a child, click-through (`WS_EX_TRANSPARENT`),
+unresponsive, Robocam's own, or of a shell or transient class (desktop, taskbar,
+menus, tooltips, combo lists, ghost windows of hung applications, Start/Task View
+surfaces and IME windows). When its DWM frame bounds intersect the bar, the same
+`avoid_bar` placement used for the main window computes the nearest position
+outside the bar within the work area, and SetWindowPos moves it asynchronously
+(resizing only windows with a sizing border when the work area is smaller). A
+window corrected more than three times within 10 seconds is left alone for 60
+seconds. The floating bar is not guarded. Recent corrections (class, process,
+from/to) are in the diagnostics report.
+
+The main window minimizes to the tray and can be restored by the robot button
 at the end of the toolbar or by the tray icon. Its bounds are constrained to monitor work
 area and away from the bar on move, resize, restore, DPI and toolbar changes.
 Main icons use 28 logical pixels in 36-pixel buttons and click icons
@@ -151,10 +213,15 @@ also account for the measured footer. There is no ellipsis or tooltip-only text.
    applications during its sequence.
 5. Verify clicks in elevated Task Manager and the Windows on-screen keyboard.
 6. Confirm the AppBar spans the monitor and maximized windows remain below it.
+   Place a normal window and a small dialog at the top of the screen; both move
+   below the bar within 2 seconds and appear in `desktop_guard.recent_moves`.
 7. Verify the highest-privilege login task and Realtime priority in diagnostics.
-8. Enable cursor feedback, test timed single/multi-clicks and dragging, then cancel
-   using pause or tracking loss. Check restoration and independent profile settings.
-   Compare light/dark toolbar outlines and the fourth-position SketchUp button.
+8. Enable cursor feedback, test timed single/multi-clicks and dragging over
+   links, text and window borders, then cancel using pause or tracking loss. Check
+   that the pointer stays visible on the physical display, returns to the saved
+   scheme and size, and that profile settings are independent. Test click sound and
+   the drag-start sound. Compare light/dark toolbar outlines and the fourth-position
+   SketchUp button.
 
 Unit tests cover timing, selection, gesture actions, device identity, persistence,
 version checks and real OpenCV tracking on synthetic frames. Package smoke tests
@@ -166,16 +233,28 @@ checks that the toolbar remains the actual hit-test target while the main window
 is hidden, restores the desktop and verifies reopening the main window. Run this
 only in an interactive session; it briefly rearranges that session's windows.
 
-`--cursor-test <report.json>` requires an interactive desktop and an idle physical
-mouse. It injects real presses and drags only into its own white test window, moves
-within that window, then restores the original pointer position. It checks composited
-black/yellow pixels and hotspot position during held clicks with the main thread
-blocked, target cursor changes, repeated presses/releases, click-through behavior,
-focus retention and destruction of the overlay on exit. Standard cursor role images
-must remain unchanged. It saves only its own fixture and overlay. GDI captures do
-not prove that a hardware cursor is visible: physical display checks in Chrome,
-on the desktop and on the deployment machine remain necessary. Stop the normal
-Robocam instance before this test to avoid competing input.
+`--cursor-test <report.json>` requires an interactive desktop and briefly changes
+the session's pointer. It injects no input. It shows a small white topmost window
+under the pointer whose class cursor is the standard arrow, so the displayed
+pointer is a system role. It applies the highlight through the same worker as a
+click with a 0 ms press and checks that every role matches the pointer file built
+for the current size (size, hotspot, shape and black/yellow pixels), that the
+pointer is still showing, that the highlight is unchanged at 400 ms and lasts at
+least 500 ms. It then checks that release, rapid repeated presses and the guard
+(closing its pipe while armed, as a crash would) each restore every role pixel for
+pixel. Role images come from GDI, which never shows a hardware pointer, so it also
+reads the shape handed to the display with DXGI Desktop Duplication
+(`GetFramePointerShape`) before, during and after the highlight:
+`physical_display_verified` requires a colour shape the size of the user's
+displayed pointer (both include any shadow margin) with black and toolbar-yellow
+pixels, and the original shape afterwards. If duplication is unavailable, the
+report says so. It reports the source file, pointer size, apply/visible times and
+saves the normal and highlighted roles and the displayed shapes, over white and
+black, as a BMP beside the report. Looking at the screen remains the final check.
+
+`--simulate-frozen-camera <ms>` makes the first camera session repeat one image
+after that many milliseconds, to check that the watchdog restarts the camera and
+tracking resumes.
 
 UI language is selected in General settings and saved application-wide; it takes
 effect at the next launch. SketchUp visibility and click feedback are per-profile.

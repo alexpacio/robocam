@@ -92,6 +92,12 @@ window button and tray icon restore and bring the webcam window to the foregroun
 The main window is kept inside the available desktop area when moved, resized or
 restored, including after camera/DPI changes. Its title bar cannot be covered by
 the click bar. The robot button at the right end of the toolbar always restores it.
+Other applications' windows that end up under the docked bar, such as small
+dialogs placed at the top of the screen, are moved just below it (or beside it
+for side and bottom bars) when they appear or are dragged, and within 2 seconds
+otherwise. Maximized, fullscreen, minimized and unresponsive windows, and Windows'
+own shell windows, are left alone. A window that keeps moving itself back is left
+alone for a minute.
 Keyboard, configuration, setup and help remain available in the main window.
 The main window cannot be resized or maximized manually; it fits the camera preview
 and monitor DPI automatically (100%, 125%, 150%, 200%, etc.), including when moved
@@ -104,18 +110,27 @@ lasts, including double/triple and SketchUp clicks. Both are saved per profile.
 Existing profiles keep their previous press timing until edited. Very long presses
 can exceed Windows' double-click interval and be recognized as separate clicks.
 
-Below **Play a sound on click**, enable **Black cursor with yellow outline during
-click**. While a mouse button is held, Robocam draws a black arrow with the same
-**#FFE600** yellow outline as the high-contrast toolbar. It uses the standard Windows
-arrow's shape and hotspot in a transparent, non-interactive overlay. On release
-(including the gaps between double/triple clicks), Windows draws its normal pointer.
-The overlay has its own rendering thread so camera processing does not stall it.
-Windows cursor images, roles and saved preferences are never replaced. Native
-pointer drawing is suppressed only after the overlay has been presented; release,
-cancellation, pause and exit restore it. A separate guard restores visibility if
-the application terminates unexpectedly during a press.
-This option is saved per profile and starts off.
-Zero-duration clicks also have zero-duration cursor feedback.
+**Play a sound on click** enables audio feedback, with a different sound when
+starting a drag.
+
+Below it, **Black cursor with yellow outline during click** turns the pointer black
+with the same **#FFE600** yellow outline as the high-contrast toolbar from the first
+press of a click until its last release, including double/triple clicks and dragging,
+and for at least half a second, so clicks with a 0 ms press duration show it too.
+Robocam temporarily changes the image of the standard Windows pointers. It starts
+from the arrow Windows actually draws (with the accessibility custom-colour style,
+the coloured copy Windows keeps in your profile; otherwise your pointer scheme's
+arrow) at the size Windows draws it, which is the pointer size chosen in Windows
+settings times the monitor's scaling. Your arrow keeps its shape, size, hotspot and
+outline width; its fill turns black and its outline yellow.
+Windows still draws the pointer itself, also when the graphics card draws it (a
+hardware pointer), so it cannot disappear. Links, text and resize pointers also
+show the black arrow during the press; pointers drawn by an application itself,
+such as SketchUp's tools, keep their own look.
+Release, cancellation, pause, profile changes and exit reload your saved Windows
+pointer scheme, including the size and colour chosen in Windows settings. A hidden
+guard reloads it if Robocam terminates during a press; the change is never saved,
+so signing out also restores it. The option is saved per profile and starts off.
 
 ![Click timing and feedback settings](docs/images/click-settings.png)
 
@@ -178,6 +193,15 @@ with Save as; the built-in profile cannot be deleted.
 Camera failure or loss of reliable optical-flow features always releases held
 buttons. Calibration and the live preview use the same tracking-readiness check
 as pointer movement. Full pause also stops movement without stopping camera preview.
+
+A watchdog checks every 2 seconds. If the camera keeps sending the same image,
+stops sending images or fails, Robocam restarts it, waiting longer between repeated
+attempts; it waits while Configuration is open. While head control is active, it
+also frees the pointer if another application has confined it to part of the
+screen. With **Stop pointer when face is not detected** off (as in Robo), the
+pointer can stop following the head while the face is not detected, for example
+when looking down, until the face is found again; the diagnostics report records
+these episodes.
 
 ![Main camera window, captured with camera acquisition disabled](docs/images/main-window.png)
 

@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.1.0 - 2026-10-15
+
+- Fixed **Black cursor with yellow outline during click** showing no change on
+  computers whose graphics card draws the pointer (a hardware pointer), notably
+  with the Windows accessibility pointer styles. Robocam now builds the black arrow
+  from the pointer file Windows actually draws (the custom-colour copy in your
+  profile, or your pointer scheme's arrow), at the size Windows draws it (pointer
+  size times the monitor's scaling), and applies it as a pointer file. It keeps your
+  arrow's shape, hotspot and outline width with a black fill and the #FFE600 toolbar
+  outline. Links, text and resize pointers show the same arrow while the button is
+  down. Earlier builds hid the pointer behind an overlay (1.0.0) or swapped in a
+  32 px image that a hardware pointer never displayed.
+- The highlight lasts from the first press to the last release of a double or
+  triple click, and for at least half a second, so clicks with a 0 ms press
+  duration show it too. Release, cancellation, pause, profile changes and exit
+  reload your saved Windows pointer scheme, size and colour; a hidden guard
+  reloads it if Robocam terminates during a press.
+- Added a desktop guard: windows that end up under the docked click bar, such as
+  small dialogs placed at the top of the screen, are moved just below it (or beside
+  it for side and bottom bars). It reacts when windows appear or are dragged and
+  checks every 2 seconds. Maximized, fullscreen, minimized, hung and shell windows
+  are left alone, and a window that keeps moving itself back is left alone for a
+  minute. The floating bar is not guarded.
+- Added a 2-second watchdog. While head control is active it releases a pointer
+  confinement (ClipCursor) left by another application. It restarts the camera
+  automatically when it keeps delivering the same image, stops delivering frames or
+  fails, waiting longer between repeated attempts; this is deferred while
+  Configuration is open. Previously a failed camera needed a manual restart.
+- Diagnostics (`--diagnostic-report`) now record camera restarts, how long the
+  image has been unchanged, per-second tracking motion, stall episodes (face lost
+  while tracking continues, or a frozen image) with the clicks sent during them,
+  windows moved from under the bar and pointer confinements released.
+- `--cursor-test` now compares every role with the highlight built for the current
+  pointer size and also reads the pointer shape handed to the display with DXGI
+  Desktop Duplication, which sees hardware pointers that screen captures miss. It
+  shows its own small window with the standard arrow under the pointer and saves
+  the displayed shapes beside the report. The README and behavior guide describe
+  the new mechanism, guard and watchdog.
+- Known issue: with **Stop pointer when face is not detected** off, the pointer
+  can stop following the head while the face detector does not find the face (for
+  example when looking down) even though camera images keep arriving, until the
+  face is found again. The watchdog records these episodes; it does not change
+  tracking.
+- Upgrade note: profiles keep their cursor feedback preference. Pointers drawn by
+  applications themselves, such as SketchUp's tools, are not recoloured. The
+  highlight pointer file is written to `%LOCALAPPDATA%\robocam\cursor`. Version
+  1.0.1 was never published; 1.1.0 includes its changes.
+
 ## 1.0.0 - 2026-10-14
 
 - Fixed automatic updates rolling back a successful installation because Windows

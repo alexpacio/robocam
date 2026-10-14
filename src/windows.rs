@@ -3,12 +3,13 @@
 
 mod camera_options;
 mod capture;
-mod click_feedback;
-mod cursor_image;
+mod click_cursor;
+mod click_sound;
 mod cursor_process;
-mod cursor_render;
 mod cursor_test;
+mod desktop_guard;
 mod desktop_test;
+mod display_pointer;
 mod drawing;
 mod legal;
 mod messages;
@@ -19,6 +20,7 @@ mod sketchup;
 mod startup;
 mod update_install;
 mod updater;
+mod watchdog;
 
 use crate::updates;
 use crate::{
@@ -263,7 +265,7 @@ struct App {
     calibration_min: (f32, f32),
     calibration_max: (f32, f32),
     injected: [bool; 3],
-    click_cursor: click_feedback::ClickCursor,
+    click_cursor: click_cursor::ClickCursor,
     dry_run: bool,
     smoke_started: Instant,
     was_controlling: bool,
@@ -289,6 +291,10 @@ struct App {
     click_actions: u64,
     last_click_dispatch_delay_ms: u64,
     pending_target: Option<HWND>,
+    desktop_guard: Option<desktop_guard::DesktopGuard>,
+    watchdog: watchdog::Watchdog,
+    /// Test only: `--simulate-frozen-camera <ms>`.
+    simulate_frozen_after_ms: Option<u64>,
 }
 
 pub fn run() {
@@ -352,7 +358,7 @@ pub fn run() {
             return;
         }
         if args.iter().any(|arg| arg == "--cursor-guardian") {
-            click_feedback::guardian();
+            click_cursor::guardian();
             return;
         }
         if let Some(path) = argument("--cursor-test") {
@@ -522,7 +528,7 @@ pub fn run() {
             smoke_started: Instant::now(),
             was_controlling: false,
             pending_input: VecDeque::new(),
-            click_cursor: click_feedback::ClickCursor::default(),
+            click_cursor: click_cursor::ClickCursor::default(),
             updater: updater::Updater::default(),
             tooltip_text: Vec::new(),
             auto_close,
@@ -543,6 +549,10 @@ pub fn run() {
             click_actions: 0,
             last_click_dispatch_delay_ms: 0,
             pending_target: None,
+            desktop_guard: None,
+            watchdog: watchdog::Watchdog::default(),
+            simulate_frozen_after_ms: argument("--simulate-frozen-camera")
+                .and_then(|value| value.parse().ok()),
         });
         let pointer = &mut *app as *mut App as *const c_void;
         let hwnd = CreateWindowExW(
@@ -573,6 +583,7 @@ pub fn run() {
         app.register_hotkeys();
         if !dry_run {
             app.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), instance, 0);
+            app.desktop_guard = desktop_guard::DesktopGuard::start();
         }
         app.tray(NIM_ADD);
         if !dry_run && let Err(error) = runtime::ensure_realtime() {
@@ -657,6 +668,10 @@ pub fn run() {
         let _cleanup_guard = CallbackGuard::enter();
         remove_appbar(app.bar);
         app.release_all();
+        app.click_cursor.stop();
+        if let Some(mut guard) = app.desktop_guard.take() {
+            guard.stop();
+        }
         app.write_diagnostics(false);
         if let Some(camera) = app.camera.take() {
             camera.stop();
@@ -1811,7 +1826,9 @@ impl App {
             face_timeout_ms: p.face_timeout_ms,
             detection_interval_ms: p.detection_interval_ms,
             manual_area: p.manual_area,
+            simulate_frozen_after_ms: self.simulate_frozen_after_ms,
         }));
+        self.watchdog.camera_started(now());
         self.status = "Opening camera…".into();
     }
 
@@ -1896,6 +1913,12 @@ impl App {
                 }
                 VisionEvent::Frame(frame) => {
                     self.frames_received += 1;
+                    self.watchdog.frame(
+                        time,
+                        &frame,
+                        self.click_actions,
+                        self.config.profile().track_face,
+                    );
                     if self.frame.is_none() {
                         self.fit_camera_window(frame.width as i32, frame.height as i32);
                     }
@@ -1924,12 +1947,14 @@ impl App {
                 }
                 VisionEvent::Zoom(zoom) => self.driver_zoom_state = Some(zoom),
                 VisionEvent::Error(error) => {
+                    self.watchdog.camera_failed();
                     self.status = error;
                     self.release_all();
                     self.last_frame = 0;
                     InvalidateRect(GetDlgItem(self.hwnd, PREVIEW as i32), null(), 0);
                 }
                 VisionEvent::Stopped => {
+                    self.watchdog.camera_failed();
                     self.release_all();
                     if self.last_frame != 0 {
                         self.status = "Camera stopped. Open Configuration to restart it.".into();
@@ -1995,10 +2020,15 @@ impl App {
         }
         self.refresh_wizard_tracking();
         self.refresh_bar_visuals();
+        self.update_desktop_guard();
+        self.watch_camera(time);
         if time.saturating_sub(self.diagnostic_written_ms) >= 1000 {
             if !self.dry_run {
                 let _ = runtime::ensure_realtime();
             }
+            // Start or stop the feedback worker and its guard after option and
+            // profile changes, so the first highlighted press is not delayed.
+            self.update_click_cursor();
             self.diagnostic_written_ms = time;
             self.write_diagnostics(true);
         }
@@ -2020,7 +2050,6 @@ impl App {
                     let time = now();
                     self.pending_input
                         .extend(click_sequence(time, button, count, press, spacing));
-                    self.update_click_cursor();
                     self.play_click_sound(false);
                     // A zero-delay click should reach Windows in this frame,
                     // without waiting for another WM_TIMER delivery.
@@ -2130,7 +2159,23 @@ impl App {
         );
     }
 
-    unsafe fn write_diagnostics(&self, running: bool) {
+    /// Tell the desktop guard where the docked bar is and whether head control
+    /// is moving the pointer.
+    unsafe fn update_desktop_guard(&self) {
+        let Some(guard) = &self.desktop_guard else {
+            return;
+        };
+        let mut bar: RECT = zeroed();
+        let docked = self.config.profile().bar_position != 4
+            && IsWindowVisible(self.bar) != 0
+            && GetWindowRect(self.bar, &mut bar) != 0;
+        guard.update(
+            docked.then_some(bar),
+            self.enabled && !self.full_paused && self.tracking_ready(),
+        );
+    }
+
+    unsafe fn write_diagnostics(&mut self, running: bool) {
         let Some(path) = &self.diagnostic_path else {
             return;
         };
@@ -2171,7 +2216,7 @@ impl App {
             "last_dwell_duration_ms":self.click.last_dwell_duration_ms(),
             "last_click_dispatch_delay_ms":self.last_click_dispatch_delay_ms,
             "click_actions":self.click_actions,
-            "click_cursor_active":self.click_cursor.active(),
+            "click_cursor_active":self.click_cursor.applied(),
             "physical_mouse_pause_ms":self.config.profile().pause_on_mouse_ms,
             "calibration_ready":self.tracking_ready(),
             "bar_bounds":rectangle(bar), "monitor_bounds":rectangle(monitor.rcMonitor),
@@ -2183,6 +2228,11 @@ impl App {
         report["main_bounds"] = serde_json::json!(rectangle(main));
         report["main_visible"] = serde_json::json!(IsWindowVisible(self.hwnd) != 0);
         report["language"] = serde_json::json!(self.config.language);
+        report["watchdog"] = self.watchdog.report(now(), self.click_actions);
+        report["desktop_guard"] = self
+            .desktop_guard
+            .as_ref()
+            .map_or(serde_json::Value::Null, desktop_guard::DesktopGuard::report);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -2653,13 +2703,14 @@ impl App {
     unsafe fn verify_click_feedback(&mut self) {
         let previous = self.config.profile().black_cursor_on_click;
         self.config.profile_mut().black_cursor_on_click = true;
-        // Only actual presses are highlighted; gaps and delays stay native.
+        // A press starts the highlight; it lasts through multi-click gaps.
         for count in 1..=3 {
             self.pending_input
                 .extend(click_sequence(now(), MouseButton::Left, count, 100, 25));
             while let Some((_, button, down)) = self.pending_input.pop_front() {
                 self.button(button, down);
-                assert_eq!(self.click_cursor.active(), down);
+                let continuing = !self.pending_input.is_empty();
+                assert_eq!(self.click_cursor.active(), down || continuing);
             }
             assert!(!self.click_cursor.active());
         }
@@ -2669,17 +2720,23 @@ impl App {
             self.release_all();
             assert!(!self.click_cursor.active());
         }
-        // Cancellation before a delayed SketchUp press restores feedback too.
+        // A delayed SketchUp press is not highlighted early, and cancelling it
+        // leaves the normal pointer.
         self.pending_input
             .extend(click_sequence(now() + 40, MouseButton::Left, 2, 100, 25));
         self.update_click_cursor();
         assert!(!self.click_cursor.active());
         self.release_all();
         assert!(!self.click_cursor.active());
-        self.config.profile_mut().black_cursor_on_click = false;
+        // Disabling the option ends a highlight that is still held.
         self.button(MouseButton::Left, true);
+        assert!(self.click_cursor.active());
+        self.config.profile_mut().black_cursor_on_click = false;
+        self.update_click_cursor();
         assert!(!self.click_cursor.active());
         self.release_all();
+        // Dry runs never start the worker that changes the session's cursors.
+        assert!(!self.click_cursor.applied());
         self.config.profile_mut().black_cursor_on_click = previous;
     }
 }

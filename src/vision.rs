@@ -30,6 +30,9 @@ const CASCADE: &str = include_str!("../assets/models/haarcascade_frontalface_def
 // deliberately nonblocking, but opening the replacement must wait for the old
 // driver's handle to be released. Only capture threads take this lock.
 static CAMERA_SESSION: Mutex<()> = Mutex::new(());
+/// `--simulate-frozen-camera` freezes only the first camera session, so the
+/// watchdog's restart can be seen to recover.
+static FROZEN_SIMULATED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionConfig {
@@ -42,6 +45,8 @@ pub struct VisionConfig {
     pub detection_interval_ms: u64,
     /// Normalized x, y, width, height in the mirrored preview.
     pub manual_area: [f32; 4],
+    /// Test only: repeat one camera image after this many milliseconds.
+    pub simulate_frozen_after_ms: Option<u64>,
 }
 
 impl Default for VisionConfig {
@@ -55,6 +60,7 @@ impl Default for VisionConfig {
             face_timeout_ms: 5_000,
             detection_interval_ms: 400,
             manual_area: [0.25, 0.35, 0.5, 0.3],
+            simulate_frozen_after_ms: None,
         }
     }
 }
@@ -75,6 +81,9 @@ pub struct VisionFrame {
     pub face_rect: Option<[i32; 4]>,
     pub fps: f32,
     pub tracked_points: usize,
+    /// How long the camera has delivered the same image. A live sensor's noise
+    /// changes every frame, so a value above a few frames means a stalled camera.
+    pub unchanged_ms: u64,
     /// Timestamp allows the consumer to reject an old frame after a UI stall.
     pub captured_at: Instant,
 }
@@ -409,6 +418,10 @@ fn process_camera(
     let mut previous_frame = Instant::now();
     let mut fps = 0.0;
     let mut missed_frames = 0;
+    let started = Instant::now();
+    let mut frozen: Option<Mat> = None;
+    let mut last_signature = None;
+    let mut unchanged_since = Instant::now();
     while !stop.load(Ordering::Acquire) {
         if settings.swap(false, Ordering::AcqRel) {
             let _ = camera.set(videoio::CAP_PROP_SETTINGS, 1.0);
@@ -435,7 +448,27 @@ fn process_camera(
             continue;
         }
         missed_frames = 0;
+        if config
+            .simulate_frozen_after_ms
+            .is_some_and(|after| started.elapsed() >= Duration::from_millis(after))
+            && (frozen.is_some() || !FROZEN_SIMULATED.swap(true, Ordering::AcqRel))
+        {
+            let clone = |image: &Mat| {
+                image
+                    .try_clone()
+                    .map_err(|e| format!("Camera capture failed: {e}"))
+            };
+            if frozen.is_none() {
+                frozen = Some(clone(&captured)?);
+            }
+            captured = clone(frozen.as_ref().unwrap())?;
+        }
         let now = Instant::now();
+        let signature = signature(&captured);
+        if signature.is_none() || signature != last_signature {
+            last_signature = signature;
+            unchanged_since = now;
+        }
         let elapsed = now.duration_since(previous_frame).as_secs_f32();
         previous_frame = now;
         if elapsed > 0.0 {
@@ -460,6 +493,8 @@ fn process_camera(
             fps,
         )
         .map_err(|e| format!("Camera image processing failed: {e}"))?;
+        let mut frame = frame;
+        frame.unchanged_ms = now.duration_since(unchanged_since).as_millis() as u64;
         if !stop.load(Ordering::Acquire) {
             mailbox
                 .lock()
@@ -551,8 +586,22 @@ fn process_frame(
         face_rect: Some([area.x, area.y, area.width, area.height]),
         fps,
         tracked_points: tracker.points.len(),
+        unchanged_ms: 0,
         captured_at: now,
     })
+}
+
+/// A cheap fingerprint of a camera image, sampling every 16th byte.
+fn signature(image: &Mat) -> Option<u64> {
+    let bytes = image.data_bytes().ok()?;
+    Some(
+        bytes
+            .iter()
+            .step_by(16)
+            .fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            }),
+    )
 }
 
 struct FeatureTracker {
@@ -779,6 +828,17 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_image_keeps_its_signature_and_a_changed_one_does_not() {
+        let image =
+            Mat::new_rows_cols_with_default(HEIGHT, WIDTH, core::CV_8UC3, Scalar::all(90.0))
+                .unwrap();
+        assert_eq!(signature(&image), signature(&image.try_clone().unwrap()));
+        let mut noisy = image.try_clone().unwrap();
+        *noisy.at_2d_mut::<core::Vec3b>(0, 0).unwrap() = core::Vec3b::from([91, 90, 90]);
+        assert_ne!(signature(&image), signature(&noisy));
+    }
+
+    #[test]
     fn mailbox_is_bounded_and_discards_motion_after_a_gui_stall() {
         let mut mailbox = Mailbox::default();
         let start = Instant::now();
@@ -794,6 +854,7 @@ mod tests {
                 face_rect: None,
                 fps: 30.0,
                 tracked_points: 20,
+                unchanged_ms: 0,
                 captured_at: start + Duration::from_millis(millis),
             });
         }
@@ -809,6 +870,7 @@ mod tests {
             face_rect: None,
             fps: 30.0,
             tracked_points: 20,
+            unchanged_ms: 0,
             captured_at: start + Duration::from_millis(300),
         });
         let latest = mailbox.frame.unwrap();
