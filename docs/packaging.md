@@ -49,6 +49,21 @@ Packaging smoke-tests the staged executable with SDK directories removed from
 PATH, isolated settings and input/camera capture disabled. It requires the native
 windows/options/toolbar to open and shut down cleanly before creating artifacts.
 
+Application and source packages include Apache-2.0 `LICENSE`, `NOTICE`, the
+changelog and `THIRD_PARTY_NOTICES.md`. The app displays its license and warranty
+disclaimer under **Tools > Licenses and disclaimers** and in Help and about;
+**Tools > Open dependency licenses** opens the local `licenses` collection.
+English license texts remain verbatim when the interface language is Italian.
+
+`licenses/DEPENDENCIES.md` links to the preserved OpenCV, IPP, face-model and
+installer notices. `licenses/RUST_DEPENDENCIES.md` and `rust-dependencies.json`
+record all resolved crate versions, declared licenses, attribution, upstream
+references and links to local license files. Packaging also preserves nested
+license files and license-bearing AUTHORS/README files. Two omitted upstream
+license texts are supplemented from `assets/licenses`; see its README for
+versioned provenance. Packaging stops if any dependency has no license notice
+or if the installer engine's original license is missing.
+
 CI runs formatting, Clippy, tests, release compilation and installer packaging
 on `windows-2022`. Its artifacts are unsigned builds. Tags named `vX.Y.Z` must
 match Cargo, installer, Windows manifest and a dated changelog entry, and the

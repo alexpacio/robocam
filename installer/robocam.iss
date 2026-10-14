@@ -1,6 +1,6 @@
 ; Run scripts\package.ps1 to stage the application and compile this installer.
 #ifndef AppVersion
-  #define AppVersion "0.8.0"
+  #define AppVersion "0.8.1"
 #endif
 #ifndef SourceDir
   #error SourceDir must name the staged application directory
@@ -13,7 +13,10 @@
 AppId={{5B6EA626-8D46-4733-857F-93F136759B53}
 AppName=robocam
 AppVersion={#AppVersion}
-AppPublisher=robocam contributors
+VersionInfoVersion={#AppVersion}.0
+VersionInfoTextVersion={#AppVersion}.0
+VersionInfoProductVersion={#AppVersion}.0
+AppPublisher=Alessandro Bolletta
 DefaultDirName={autopf}\robocam
 UsePreviousAppDir=no
 DefaultGroupName=robocam

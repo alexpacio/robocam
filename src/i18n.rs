@@ -43,6 +43,27 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Configuration…" => "Configurazione…",
         "Setup and calibration…" => "Configurazione guidata e calibrazione…",
         "Help and about…" => "Guida e informazioni…",
+        "Licenses and disclaimers…" => "Licenze ed esclusioni di garanzia…",
+        "Licenses and disclaimers" => "Licenze ed esclusioni di garanzia",
+        "Open dependency licenses…" => "Apri le licenze delle dipendenze…",
+        "Author: Alessandro Bolletta. Apache License 2.0." => {
+            "Autore: Alessandro Bolletta. Apache License 2.0."
+        }
+        "Except as required by applicable law or agreed in writing, Robocam is provided AS IS, without warranties or conditions of any kind. Contributors' liability is limited to the extent permitted by law; see sections 7 and 8 of the Apache license." => {
+            "Salvo quanto richiesto dalla legge applicabile o concordato per iscritto, Robocam viene fornito COSÌ COM'È, senza garanzie o condizioni di alcun tipo. La responsabilità dei collaboratori è limitata nella misura consentita dalla legge; consultare le sezioni 7 e 8 della licenza Apache."
+        }
+        "Third-party components retain their own licenses and disclaimers, including proprietary Intel IPP and Microsoft runtime libraries." => {
+            "I componenti di terze parti mantengono le proprie licenze ed esclusioni di garanzia, inclusi Intel IPP e le librerie runtime Microsoft, che sono proprietari."
+        }
+        "Use Tools > Licenses and disclaimers for the full license and references, or Tools > Open dependency licenses for original dependency license files." => {
+            "Usare Strumenti > Licenze ed esclusioni di garanzia per la licenza completa e i riferimenti, oppure Strumenti > Apri le licenze delle dipendenze per i file originali delle licenze."
+        }
+        "Use Tools > Open dependency licenses to read the original dependency license files offline. The authoritative license texts below are in English." => {
+            "Usare Strumenti > Apri le licenze delle dipendenze per leggere i file originali delle licenze senza connessione. I testi ufficiali delle licenze riportati sotto sono in inglese."
+        }
+        "Could not open the dependency license directory. Installed and portable packages include a licenses folder beside robocam.exe; see THIRD_PARTY_NOTICES.md for upstream references." => {
+            "Impossibile aprire la cartella delle licenze delle dipendenze. I pacchetti installabili e portatili includono una cartella licenses accanto a robocam.exe; consultare THIRD_PARTY_NOTICES.md per i riferimenti ai progetti originali."
+        }
         "Configuration" => "Configurazione",
         "Keyboard" => "Tastiera",
         "Setup" => "Configurazione guidata",

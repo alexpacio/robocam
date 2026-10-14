@@ -1,0 +1,22 @@
+robocam
+Author: Alessandro Bolletta
+https://github.com/alexpacio/robocam
+
+Robocam is authored by Alessandro Bolletta. Its original code is licensed
+under the Apache License, Version 2.0.
+See LICENSE or https://www.apache.org/licenses/LICENSE-2.0 for the full terms,
+including the disclaimer of warranty and limitation of liability.
+
+Third-party components retain their own copyrights and licenses. Robocam's
+Apache-2.0 license does not replace or extend those components' license terms.
+This distribution includes OpenCV, Intel Integrated Performance Primitives
+(IPP-ICV and IPP IW), an Intel-licensed face detector, Rust dependencies and
+Microsoft Visual C++ runtime libraries. Intel IPP and the Microsoft runtime
+are separately licensed proprietary components.
+
+See THIRD_PARTY_NOTICES.md and the licenses directory for component attribution,
+original license texts, disclaimers and dependency license references.
+No endorsement by Intel, Microsoft or any other dependency author is implied.
+
+The license change in 0.8.1 does not revoke the licenses granted for earlier
+GPL-3.0-or-later releases.

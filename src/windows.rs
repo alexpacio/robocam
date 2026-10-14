@@ -10,6 +10,7 @@ mod cursor_render;
 mod cursor_test;
 mod desktop_test;
 mod drawing;
+mod legal;
 mod messages;
 mod placement;
 mod pointer;
@@ -73,6 +74,8 @@ const RESET: u16 = 322;
 const UPDATES: u16 = 323;
 const REFRESH_CAMERAS: u16 = 324;
 const FORGET_CAMERA: u16 = 325;
+const LICENSES: u16 = 326;
+const DEPENDENCY_LICENSES: u16 = 327;
 const INPUT_TAG: usize = 0x524F424F;
 const SS_OWNERDRAW: u32 = 13;
 const SS_NOTIFY: u32 = 0x100;
@@ -1393,6 +1396,8 @@ impl App {
             (OPTIONS, "Configuration…"),
             (WIZARD, "Setup and calibration…"),
             (HELP, "Help and about…"),
+            (LICENSES, "Licenses and disclaimers…"),
+            (DEPENDENCY_LICENSES, "Open dependency licenses…"),
             (UPDATES, "Check for updates…"),
         ] {
             AppendMenuW(tools, MF_STRING, id as usize, wide(label).as_ptr());
@@ -2751,9 +2756,15 @@ impl App {
                     "Center your face in the preview, enable, then move your head. Stop over a target to click. Select an action on the click bar; select it again to lock it.\n\n",
                     "Drag modifies the selected single-click button: stop to hold, move, then stop again to release. Scroll: stop to enter, move your head to scroll, stop again to leave. No click disables desktop clicks; the click bar remains accessible.\n\n",
                     "To track a manual region, turn off automatic face location and drag a rectangle in the preview.\n\n",
-                    "See README and THIRD_PARTY_NOTICES in the installation directory."
+                    "See README and THIRD_PARTY_NOTICES in the installation directory.\n\n",
+                    "Author: Alessandro Bolletta. Apache License 2.0.\n\n",
+                    "Except as required by applicable law or agreed in writing, Robocam is provided AS IS, without warranties or conditions of any kind. Contributors' liability is limited to the extent permitted by law; see sections 7 and 8 of the Apache license.\n\n",
+                    "Third-party components retain their own licenses and disclaimers, including proprietary Intel IPP and Microsoft runtime libraries.\n\n",
+                    "Use Tools > Licenses and disclaimers for the full license and references, or Tools > Open dependency licenses for original dependency license files."
                 ),
             ),
+            LICENSES => legal::show(self.hwnd),
+            DEPENDENCY_LICENSES => legal::open_files(self.hwnd),
             UPDATES => {
                 if self.dry_run {
                     return;

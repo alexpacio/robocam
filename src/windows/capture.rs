@@ -51,6 +51,27 @@ pub(super) fn start(directory: PathBuf, main: HWND, bar: HWND, options: HWND, ba
             std::thread::sleep(Duration::from_millis(150));
             window(main, &directory.join("main-paused.bmp"), None)?;
             window(bar, &directory.join("topbar-paused.bmp"), Some(bar_width))?;
+            SendMessageW(main, WM_COMMAND, usize::from(LICENSES), 0);
+            let licenses = GetLastActivePopup(main);
+            let license_text = GetDlgItem(licenses, 100);
+            let displayed = text(license_text).replace("\r\n", "\n");
+            if !displayed.ends_with(&include_str!("../../LICENSE").replace("\r\n", "\n"))
+                || GetWindowLongW(license_text, GWL_STYLE) as u32 & ES_READONLY as u32 == 0
+            {
+                return Err(
+                    "The complete original Apache license must be displayed read-only".into(),
+                );
+            }
+            window(
+                licenses,
+                &directory.join("licenses-and-disclaimers.bmp"),
+                None,
+            )?;
+            let end = GetWindowTextLengthW(license_text);
+            SendMessageW(license_text, EM_SETSEL, end as usize, end as isize);
+            SendMessageW(license_text, EM_SCROLLCARET, 0, 0);
+            window(licenses, &directory.join("apache-license-end.bmp"), None)?;
+            SendMessageW(licenses, WM_COMMAND, 1, 0);
             Ok(())
         })();
         let message = match result {
@@ -114,6 +135,18 @@ unsafe fn window(hwnd: HWND, path: &Path, crop_width: Option<i32>) -> Result<(),
     let result = if PrintWindow(hwnd, dc, 2) == 0 {
         Err("PrintWindow failed".into())
     } else {
+        let mut class_name = [0u16; 64];
+        let length = GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32);
+        if String::from_utf16_lossy(&class_name[..length.max(0) as usize]) == "robocam.notice" {
+            // Default Win32 notice windows need explicit background/child printing;
+            // PW_RENDERFULLCONTENT otherwise captures a black client surface.
+            SendMessageW(
+                hwnd,
+                WM_PRINT,
+                dc as usize,
+                (PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN) as isize,
+            );
+        }
         let mut bmp = vec![0u8; 54];
         bmp[0..2].copy_from_slice(b"BM");
         bmp[2..6].copy_from_slice(&((bytes + 54) as u32).to_le_bytes());

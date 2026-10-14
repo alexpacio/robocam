@@ -39,6 +39,8 @@ pub(super) unsafe fn confirm_pause(owner: HWND, target: bool) {
             "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained."
         },
         Some(target),
+        true,
+        "robocam",
     );
 }
 
@@ -48,10 +50,20 @@ struct Notice {
 }
 
 pub(super) unsafe fn show(owner: HWND, content: &str) {
-    show_notice(owner, content, None);
+    show_notice(owner, content, None, true, "robocam");
 }
 
-unsafe fn show_notice(owner: HWND, content: &str, pause_target: Option<bool>) {
+pub(super) unsafe fn show_verbatim(owner: HWND, title: &str, content: &str) {
+    show_notice(owner, content, None, false, title);
+}
+
+unsafe fn show_notice(
+    owner: HWND,
+    content: &str,
+    pause_target: Option<bool>,
+    translate: bool,
+    title: &str,
+) {
     let class_name = wide_raw(CLASS);
     let instance = GetModuleHandleW(null());
     let class = WNDCLASSW {
@@ -70,7 +82,7 @@ unsafe fn show_notice(owner: HWND, content: &str, pause_target: Option<bool>) {
     let window = CreateWindowExW(
         WS_EX_CONTROLPARENT,
         class_name.as_ptr(),
-        wide_raw("robocam").as_ptr(),
+        wide(title).as_ptr(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         owner_bounds.left + (owner_bounds.right - owner_bounds.left - scale(570, dpi)) / 2,
         owner_bounds.top + (owner_bounds.bottom - owner_bounds.top - scale(height, dpi)) / 2,
@@ -85,14 +97,23 @@ unsafe fn show_notice(owner: HWND, content: &str, pause_target: Option<bool>) {
         return;
     }
     // Native multiline EDIT controls require CRLF, including translated text.
-    let content = crate::i18n::translate(content)
-        .replace("\r\n", "\n")
-        .replace('\n', "\r\n");
+    let content = if translate {
+        crate::i18n::translate(content)
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    }
+    .replace("\r\n", "\n")
+    .replace('\n', "\r\n");
     let field = CreateWindowExW(
         0,
         wide_raw("EDIT").as_ptr(),
         wide_raw(&content).as_ptr(),
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_VSCROLL
+            | ES_MULTILINE as u32
+            | ES_READONLY as u32
+            | if translate { 0 } else { WS_TABSTOP },
         scale(16, dpi),
         scale(14, dpi),
         scale(522, dpi),

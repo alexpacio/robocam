@@ -3,6 +3,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/app.manifest");
     #[cfg(windows)]
     {
+        let windows_version = format!("{}.0", env!("CARGO_PKG_VERSION"));
         let mut resource = winresource::WindowsResource::new();
         resource
             .set_icon("assets/robocam.ico")
@@ -10,7 +11,12 @@ fn main() {
             .set("ProductName", "robocam")
             .set("FileDescription", "robocam head-controlled mouse")
             .set("OriginalFilename", "robocam.exe")
-            .set("LegalCopyright", "robocam contributors. GPL-3.0-or-later.");
+            .set("FileVersion", &windows_version)
+            .set("ProductVersion", &windows_version)
+            .set(
+                "Comments",
+                "Author: Alessandro Bolletta. Apache License 2.0. See LICENSE and THIRD_PARTY_NOTICES.md.",
+            );
         resource
             .compile()
             .expect("Failed to compile Windows resources");

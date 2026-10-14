@@ -3,6 +3,8 @@
 A Windows 11 head-controlled mouse written in Rust, with a native interface and
 OpenCV face detection and optical-flow tracking. Camera images stay on the PC.
 
+Author: **Alessandro Bolletta**.
+
 ## Install and start
 
 Download the installer from [GitHub Releases](https://github.com/alexpacio/robocam/releases/latest).
@@ -230,5 +232,27 @@ The installer, portable ZIP, corresponding source and checksums are written to
 `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check`.
 See [packaging](docs/packaging.md) and [behavior and verification](docs/behavior.md).
 
-The project is GPL-3.0-or-later. See [LICENSE](LICENSE) and
-[third-party notices](THIRD_PARTY_NOTICES.md). Packages include corresponding source.
+## License and disclaimers
+
+Robocam's original code is licensed under [Apache License 2.0](LICENSE), starting
+with 0.8.1. Commercial use and incorporation into closed-source products are
+permitted subject to the license terms. Earlier GPL releases retain their
+original license grants. See [NOTICE](NOTICE) for attribution.
+
+Except as required by applicable law or agreed in writing, Robocam is supplied
+"AS IS", without warranties or conditions of any kind, express or implied.
+The license limits contributors' liability to the extent permitted by law;
+see sections 7 and 8 of [LICENSE](LICENSE) for the full terms.
+
+Open **Tools > Licenses and disclaimers** in the application to read the notices
+and full Apache license offline. **Tools > Open dependency licenses** opens the
+installed license collection, including `RUST_DEPENDENCIES.md`, which links every
+resolved Rust dependency to its license files and upstream crate.
+
+![In-app license, warranty disclaimer and dependency references](docs/images/licenses-and-disclaimers.png)
+
+[Third-party components](THIRD_PARTY_NOTICES.md) retain their own licenses,
+copyrights and disclaimers. In particular, Intel IPP inside OpenCV and the
+Microsoft Visual C++ runtime are proprietary components; Robocam's Apache license
+does not grant rights to modify them. Application and source packages include
+NOTICE, the changelog and the complete dependency license collection.

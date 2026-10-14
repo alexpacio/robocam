@@ -1,9 +1,10 @@
 [package]
 name = "robocam"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Head-controlled mouse for Windows 11"
-license = "GPL-3.0-or-later"
+authors = ["Alessandro Bolletta"]
+license = "Apache-2.0"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

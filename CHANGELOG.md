@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.1 - 2026-10-14
+
+- Relicensed Robocam's original code under Apache License 2.0 to allow broad
+  reuse, including proprietary products. Earlier GPL releases retain their
+  original license grants; third-party components retain their separate terms.
+- Identify Alessandro Bolletta as Robocam's author in
+  application notices, Cargo metadata, Windows resources and the installer.
+- Added in-app Licenses and disclaimers and Open dependency licenses commands,
+  with English/Italian warranty and liability summaries and the original
+  English Apache license. Help and about also displays the license/disclaimer.
+- Added native documentation captures that verify the full original license is
+  displayed read-only, including when the interface uses Italian.
+- Explicitly attributed Intel IPP 2021.11.0 and its separate Intel Simplified
+  Software License. Added dependency license citations and a complete resolved
+  Rust dependency index linking to packaged license texts and upstream crates.
+- Include NOTICE and dependency notices in application and source packages;
+  preserve license-bearing AUTHORS/README files and supply license texts omitted
+  from two upstream crate archives. Packaging rejects missing dependency notices.
+
 ## 0.8.0 - 2026-10-14
 
 - Consolidated the existing development history into a single initial commit,
