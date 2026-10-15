@@ -1,6 +1,6 @@
 ; Run scripts\package.ps1 to stage the application and compile this installer.
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.1.1"
 #endif
 #ifndef SourceDir
   #error SourceDir must name the staged application directory
@@ -42,7 +42,9 @@ Name: autostart; Description: "Start robocam when I sign in to Windows"; GroupDe
 Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\enable-uiaccess.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "robocam.exe,enable-uiaccess.ps1"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\robocam.exe"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: ReapplyUIAccess
 
 [Registry]
 ; Elevated startup is registered as an interactive logon task by robocam.
@@ -55,17 +57,53 @@ Name: "{userdesktop}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}
 [Run]
 Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
 Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
-Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Check: UIAccessReady; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; RunOnceId: "RemoveStartupTask"; Flags: runhidden waituntilterminated
 
 [Code]
+var
+  UIAccessFailed: Boolean;
+
+function UIAccessReady: Boolean;
+begin
+  Result := not UIAccessFailed;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := 0;
+  if UIAccessFailed then
+    Result := 10;
+end;
+
+procedure ReapplyUIAccess;
+var
+  ResultCode: Integer;
+begin
+  { Re-sign before startup configuration, application launch or updater restart.
+    Inno's file callbacks swallow exceptions: explicitly fail the exit status
+    and suppress launches so the updater can restore its application backup. }
+  Log('Reapplying machine-local UIAccess configuration.');
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\enable-uiaccess.ps1') + '" -Reapply -Executable "' +
+    ExpandConstant('{app}\robocam.exe') + '"',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    UIAccessFailed := True;
+  Log('UIAccess configuration exit code: ' + IntToStr(ResultCode));
+  if ResultCode <> 0 then
+    UIAccessFailed := True;
+  if UIAccessFailed then
+    SuppressibleMsgBox('Robocam UIAccess signing failed. Run enable-uiaccess.ps1 -Reapply as administrator to diagnose the machine signing certificate.', mbError, MB_OK, IDOK);
+end;
+
 function NotUpdating: Boolean;
 var
   I: Integer;
 begin
-  Result := True;
+  Result := not UIAccessFailed;
   for I := 1 to ParamCount do
     if CompareText(ParamStr(I), '/ROBOCAMUPDATE=1') = 0 then
       Result := False;

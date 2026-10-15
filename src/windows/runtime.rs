@@ -1,6 +1,24 @@
 use super::*;
 use windows_sys::Win32::Security::{Authorization::ConvertSidToStringSidW, *};
 
+pub(super) unsafe fn ui_access() -> Option<bool> {
+    let mut token = null_mut();
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        return None;
+    }
+    let mut enabled = 0u32;
+    let mut returned = 0;
+    let success = GetTokenInformation(
+        token,
+        TokenUIAccess,
+        &mut enabled as *mut _ as *mut c_void,
+        size_of::<u32>() as u32,
+        &mut returned,
+    ) != 0;
+    CloseHandle(token);
+    success.then_some(enabled != 0)
+}
+
 pub(super) unsafe fn elevated() -> bool {
     let mut token = null_mut();
     if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {

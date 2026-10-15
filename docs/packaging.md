@@ -81,6 +81,60 @@ Hardware-based camera acceptance and release signing remain separate checks.
 The application checks `alexpacio/robocam` GitHub releases when requested; a 404
 means that no public release has been published yet.
 
+## Machine-local UIAccess
+
+Robocam can opt into Windows' assistive-technology UIAccess privilege on a
+particular PC. This requires an Authenticode signature trusted by that machine
+and installation in a protected location such as Program Files. See Microsoft's
+[assistive technology security requirements](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-securityoverview).
+UIAccess does not grant general access to System-integrity windows or the secure
+desktop. Verify the specific blocked-input scenario separately.
+
+From an elevated **Windows PowerShell 5.1** in the user's interactive session:
+
+```powershell
+# Release held input and close cleanly. Wait until all robocam processes exit.
+& "$env:ProgramFiles\robocam\robocam.exe" --request-exit
+
+# Run once after installing version 1.1.1 or later.
+& "$env:ProgramFiles\robocam\enable-uiaccess.ps1" -Provision
+
+# Restart using the usual elevated interactive startup task or desktop shortcut.
+```
+
+Provisioning creates a SHA-256/RSA code-signing certificate valid for three years
+in `Cert:\LocalMachine\My`, with a non-exportable private key. Its public
+certificate is trusted in that PC's machine Root and TrustedPublisher stores.
+The script enables only the embedded manifest's UIAccess attribute, signs a
+temporary copy in the protected installation directory, verifies the signature,
+then replaces `robocam.exe`. Existing profiles and startup preferences are retained.
+The administrator-owned `HKLM\SOFTWARE\robocam\UIAccess\CertificateThumbprint`
+setting selects the certificate for later installs. No certificate or private key
+is placed in the repository, source archive or GitHub Release.
+
+On a provisioned PC, the installer invokes the bundled script with `-Reapply`
+after copying application files and before startup configuration or application
+restart. A missing, expired or unusable configured certificate fails installation;
+the automatic updater then restores its backed-up application and settings.
+On other PCs this step is a no-op and the standard executable keeps
+`uiAccess="false"`. Published installer checksums are verified before installation;
+the installed executable is subsequently signed locally, so its hash will differ
+from the executable in the downloaded archive. Portable copies are not provisioned.
+
+Use `Get-AuthenticodeSignature "$env:ProgramFiles\robocam\robocam.exe"` to verify
+the installed signature. Launch with `--diagnostic-report <path>` and confirm
+`ui_access: true` in the running process report; also verify normal launch and
+interactive logon startup. `null` means the token query failed. An embedded
+manifest and valid signature alone do not prove Windows granted UIAccess.
+
+Keep the machine private key available for updates. To remove this configuration,
+close Robocam, remove the `HKLM\SOFTWARE\robocam\UIAccess` registry key and
+reinstall the standard package before restarting. The retained public certificate
+and private key may then be removed by thumbprint from the three machine stores.
+For certificate expiry or loss, first restore the standard package this way, then
+run `-Provision` again. Uninstall intentionally retains the signing configuration
+and saved profiles so a subsequent installation can reuse them.
+
 For remote diagnostics, `--paused --diagnostic-report <path> --exit-after-ms 15000`
 runs the real camera and interface for 15 seconds with desktop clicks paused;
 head-driven pointer movement remains active.

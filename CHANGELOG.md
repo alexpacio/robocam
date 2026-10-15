@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.1 - 2026-10-15
+
+- Added optional machine-local UIAccess provisioning for Robocam installed under
+  Program Files. An administrator can create a non-exportable code-signing key,
+  trust its public certificate on that PC, enable the embedded UIAccess manifest
+  and sign the installed executable. Standard packages remain runnable without
+  provisioning; no private keys are distributed.
+- Installers reapply a provisioned machine's UIAccess signature before startup
+  configuration or restart, including automatic updates. Signing failure fails
+  installation so the updater can restore the previous application and settings.
+- Diagnostic reports now include the running process's actual `ui_access` token
+  flag. A signed manifest alone does not prove Windows granted the privilege.
+- CI verifies the real installer's signing-failure exit status and prevents
+  application launch after a signing error, using isolated disposable fixtures.
+- UIAccess does not guarantee input access to System-integrity windows. The
+  SketchUp ghost-window case still needs verification on the affected PC.
+- Upgrade note: machine-local signatures expire with the configured certificate
+  (three years for a new certificate). Retain its private key in the Windows
+  machine certificate store for subsequent updates. See the packaging guide for
+  provisioning and recovery instructions.
+
 ## 1.1.0 - 2026-10-15
 
 - Fixed **Black cursor with yellow outline during click** showing no change on

@@ -2197,6 +2197,7 @@ impl App {
             "show_sketchup_buttons":self.config.profile().show_sketchup_buttons,
             "process_id":GetCurrentProcessId(), "running":running,
             "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
+            "ui_access":runtime::ui_access(),
             "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
             "profile":self.config.active_profile, "enabled":self.enabled,
             "full_paused":self.full_paused,

@@ -50,6 +50,9 @@ jobs:
       - name: Verify updater installation, cancellation and recovery
         shell: powershell
         run: ./scripts/test-update-helper.ps1
+      - name: Verify UIAccess installer failure and launch handling
+        shell: powershell
+        run: ./scripts/test-uiaccess-installer.ps1
       - name: Package installer and portable application
         shell: pwsh
         run: ./scripts/package.ps1 -SkipBuild

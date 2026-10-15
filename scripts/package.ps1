@@ -57,6 +57,7 @@ function New-PackageZip([string]$Directory, [string]$Destination) {
 Reset-StagingDirectory $stage
 Reset-StagingDirectory $sourceStage
 Copy-Item -LiteralPath $releaseExecutable -Destination $stage
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'enable-uiaccess.ps1') -Destination $stage
 $nativeDirectory = Join-Path $env:ROBOCAM_OPENCV_ROOT 'build\x64\vc16\bin'
 foreach ($file in @('opencv_world4100.dll', 'opencv_videoio_msmf4100_64.dll')) {
     Copy-Item -LiteralPath (Join-Path $nativeDirectory $file) -Destination $stage

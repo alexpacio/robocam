@@ -13,6 +13,11 @@ requests administrator permission so input can reach elevated desktop applicatio
 including Task Manager and the Windows on-screen keyboard. Login startup is checked
 by default and uses a highest-privilege interactive task for the current user.
 
+For assistive input that needs UIAccess, an administrator can optionally provision
+a machine-local signing certificate and enable it on the installed application.
+Installers retain that configuration during upgrades. See
+[UIAccess provisioning](docs/packaging.md#machine-local-uiaccess).
+
 Normal launches request elevation. robocam sets its own process priority to
 **Realtime** and rechecks it each second. OpenCV parallelism is limited to one thread.
 Realtime is an aggressive scheduling class; it cannot prevent hardware/driver stalls
