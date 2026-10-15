@@ -37,6 +37,7 @@ pub(super) struct Updater {
     handoff: Option<(PathBuf, Instant)>,
     handed_off: bool,
     interactive: bool,
+    last_check: Option<&'static str>,
     pub result: Option<PathBuf>,
 }
 
@@ -64,11 +65,21 @@ impl Updater {
         }
         if self.checking.is_none() {
             self.release = None;
+            self.last_check = None;
             self.checking = Some(updates::check_for_updates(env!("CARGO_PKG_VERSION")));
         }
         if manual {
             panel(owner, "Checking for updates…", "Check again", false, 0);
         }
+    }
+
+    pub unsafe fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "checking": self.checking.is_some(),
+            "last_check": self.last_check,
+            "available_version": self.release.as_ref().map(|release| release.version.as_str()),
+            "window_visible": WINDOW.with(|window| !window.get().is_null() && IsWindowVisible(window.get()) != 0),
+        })
     }
 
     fn cancel(&mut self) {
@@ -131,14 +142,18 @@ impl Updater {
         }
         if let Some(result) = self.checking.as_ref().and_then(|r| r.try_recv().ok()) {
             self.checking = None;
+            self.last_check = Some(match &result {
+                UpdateResult::NewRelease(_) => "new_release",
+                UpdateResult::Current => "current",
+                UpdateResult::NotPublished => "not_published",
+                UpdateResult::Failed(_) => "failed",
+            });
             match result {
                 UpdateResult::NewRelease(release) => {
                     set_text(
                         owner,
                         &format!("robocam — update {} available", release.version),
                     );
-                    // A startup check announces availability in the title. Only
-                    // an explicit check opens controls beneath the head pointer.
                     let text = format!(
                         "robocam {}\n\n{}",
                         release.version,
@@ -146,9 +161,7 @@ impl Updater {
                             "An update is available. Download and install it now?\n\nRobocam will restart automatically. Profiles and saved settings will be retained."
                         )
                     );
-                    if self.interactive {
-                        panel(owner, &text, "Download and install", true, 0);
-                    }
+                    panel(owner, &text, "Download and install", true, 0);
                     self.release = Some(release);
                 }
                 UpdateResult::Current if self.interactive => panel(
@@ -206,11 +219,12 @@ impl Updater {
             && let Ok(result) = serde_json::from_slice::<serde_json::Value>(&bytes)
         {
             let state = result["state"].as_str().unwrap_or("");
-            if matches!(state, "complete" | "failed" | "restart_required") {
+            if state == "complete" {
+                // A successful restart needs no acknowledgement. Consume the
+                // result once so old --update-result arguments stay quiet too.
+                self.result = None;
+            } else if matches!(state, "failed" | "restart_required") {
                 let text = match state {
-                    "complete" => crate::i18n::translate(
-                        "Update installed. Profiles and settings have been retained.",
-                    ),
                     "restart_required" => crate::i18n::translate(
                         "Windows must be restarted to finish the update. Robocam will not restart Windows automatically.",
                     ),
@@ -223,6 +237,7 @@ impl Updater {
                     )
                     .into(),
                 };
+                self.release = None;
                 panel(owner, &text, "Check again", true, 0);
                 self.result = None;
             }
@@ -295,10 +310,74 @@ pub(super) unsafe fn control_at(position: (i32, i32)) -> Option<(HWND, u16)> {
 
 /// Native smoke coverage without network requests or an actual installer.
 pub(super) unsafe fn verify(owner: HWND) {
+    let respond = |updater: &mut Updater, result| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        updater.checking = Some(receiver);
+        sender.send(result).unwrap();
+    };
     let mut updater = Updater::default();
+    assert!(WINDOW.with(|window| window.get().is_null()));
+    for result in [
+        UpdateResult::Current,
+        UpdateResult::NotPublished,
+        UpdateResult::Failed("Offline during startup".into()),
+    ] {
+        respond(&mut updater, result);
+        assert!(updater.poll(owner).is_none());
+        assert!(WINDOW.with(|window| window.get().is_null()));
+        assert!(!updater.diagnostics()["checking"].as_bool().unwrap());
+    }
+    respond(
+        &mut updater,
+        UpdateResult::NewRelease(ReleaseInstaller {
+            version: "99.0.0".into(),
+            url: format!("{}/tag/v99.0.0", updates::RELEASES_URL),
+            installer_url: String::new(),
+            checksum_url: String::new(),
+            size: 1,
+        }),
+    );
+    assert!(updater.poll(owner).is_none());
+    assert!(updater.diagnostics()["window_visible"].as_bool().unwrap());
+    assert_eq!(updater.diagnostics()["available_version"], "99.0.0");
+    let window = WINDOW.with(|window| window.get());
+    assert_ne!(IsWindowEnabled(GetDlgItem(window, 1)), 0);
+    SendMessageW(window, WM_CLOSE, 0, 0);
+    assert!(updater.poll(owner).is_none());
+
+    let result_path =
+        std::env::temp_dir().join(format!("robocam-update-panel-{}.json", std::process::id()));
+    std::fs::write(&result_path, r#"{"state":"complete"}"#).unwrap();
+    updater.result = Some(result_path.clone());
+    respond(&mut updater, UpdateResult::Current);
+    assert!(updater.poll(owner).is_none());
+    assert!(updater.result.is_none());
+    assert!(WINDOW.with(|window| window.get().is_null()));
+    assert!(updater.poll(owner).is_none());
+    assert!(WINDOW.with(|window| window.get().is_null()));
+    for state in ["failed", "restart_required"] {
+        std::fs::write(
+            &result_path,
+            serde_json::json!({"state":state,"error":"Installer failed"}).to_string(),
+        )
+        .unwrap();
+        updater.result = Some(result_path.clone());
+        assert!(updater.poll(owner).is_none());
+        assert!(updater.result.is_none());
+        let window = WINDOW.with(|window| window.get());
+        assert!(!window.is_null() && IsWindowVisible(window) != 0);
+        SendMessageW(window, WM_CLOSE, 0, 0);
+        assert!(updater.poll(owner).is_none());
+    }
+    std::fs::remove_file(result_path).unwrap();
+
+    // A manual request joins an in-flight background check and shows progress.
     let (sender, receiver) = std::sync::mpsc::channel();
-    updater.interactive = true;
     updater.checking = Some(receiver);
+    updater.check(owner, true);
+    let window = WINDOW.with(|window| window.get());
+    assert!(!window.is_null() && IsWindowVisible(window) != 0);
+    assert_eq!(IsWindowEnabled(GetDlgItem(window, 1)), 0);
     sender.send(UpdateResult::Current).unwrap();
     assert!(updater.poll(owner).is_none());
     let window = WINDOW.with(|window| window.get());

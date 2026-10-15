@@ -229,8 +229,11 @@ active during download and preparation; **Cancel** stops before installation.
 
 ![Download and install directly from Robocam](docs/images/update-available.png)
 
-The optional startup check also offers newer stable
-[GitHub Releases](https://github.com/alexpacio/robocam/releases), using
+The optional startup check runs in the background and opens the Updates panel
+only when it finds a newer stable release. Up-to-date results and background
+network errors stay quiet; manual checks always show progress and results.
+Successful update restarts need no acknowledgement. Checks discover
+[GitHub Releases](https://github.com/alexpacio/robocam/releases) through
 `https://api.github.com/repos/alexpacio/robocam/releases/latest` and semantic version
 comparison. Installation starts only after choosing **Download and install**.
 Drafts, prereleases, older versions and releases without the expected installer

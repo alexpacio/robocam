@@ -261,8 +261,12 @@ effect at the next launch. SketchUp visibility and click feedback are per-profil
 
 ## In-app updates
 
-The startup preference enables release checks, not unattended installation. Tools >
-Check for updates opens a modeless panel. Download and install authorizes the full
+The startup preference enables a background release check on each process start,
+including update restarts. It opens the panel only for a newer stable release;
+current, unavailable and failed background checks stay quiet. Successful installed
+updates are consumed silently; installation failures and required Windows restarts
+still show the action needed. The startup preference does not authorize installation.
+Tools > Check for updates opens a modeless panel. Download and install authorizes the full
 download/install/restart sequence; its buttons also accept local head dwell while
 ordinary desktop clicks are paused. Network work runs off the UI thread. Cancel
 discards the pending download or cancels helper preparation while leaving Robocam running.

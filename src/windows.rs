@@ -608,7 +608,7 @@ pub fn run() {
             app.start_camera();
         }
         app.updater.result = argument("--update-result").map(std::path::PathBuf::from);
-        if app.config.check_updates && !dry_run && app.updater.result.is_none() {
+        if app.config.check_updates && !dry_run {
             app.updater.check(hwnd, false);
         }
         let minimized = updater::start_minimized(
@@ -2206,6 +2206,7 @@ impl App {
             "process_id":GetCurrentProcessId(), "running":running,
             "elevated":runtime::elevated(), "priority_class":GetPriorityClass(GetCurrentProcess()),
             "ui_access":runtime::ui_access(),
+            "updates":self.updater.diagnostics(),
             "uptime_ms":self.smoke_started.elapsed().as_millis() as u64,
             "profile":self.config.active_profile, "enabled":self.enabled,
             "full_paused":self.full_paused,

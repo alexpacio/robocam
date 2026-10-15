@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.3 - 2026-10-15
+
+- Startup update checks run in the background, including after an update restart.
+  The Updates panel opens automatically only when a newer stable release is found;
+  an up-to-date installation, unavailable release or network error stays quiet.
+  The existing startup-check preference is retained.
+- Removed the automatic success panel after an installed update. Installation
+  failures and required Windows restarts still report the action needed.
+- Manual **Tools > Check for updates** continues to show progress and results,
+  including when it joins a background check already in progress.
+- Diagnostics now record the background check's result, available version and
+  Updates panel visibility. Native smoke tests cover quiet startup, new-release
+  notification, manual checks and post-update success/failure handling.
+
 ## 1.1.2 - 2026-10-15
 
 - Fixed login startup for UIAccess-enabled installations. Task Scheduler cannot
