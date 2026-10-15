@@ -38,6 +38,9 @@ The installer targets Windows build 22000 or later and installs under
 The **Start robocam when I sign in to Windows** task is checked by default and
 registers a `robocam-<user SID>` interactive logon task with highest privileges
 and `--minimized`. The application uses the same task for its startup setting.
+The task runs a hidden Windows PowerShell shell launcher because Task Scheduler
+cannot directly create a UIAccess process. A normal elevated launch refreshes an
+existing enabled task after upgrades or provisioning; disabled startup stays off.
 The obsolete unelevated Run entry is removed. Unchecking startup removes the task.
 Uninstall removes the task and
 installed program files; application-created user profiles are retained.
@@ -99,7 +102,7 @@ From an elevated **Windows PowerShell 5.1** in the user's interactive session:
 # Run once after installing version 1.1.1 or later.
 & "$env:ProgramFiles\robocam\enable-uiaccess.ps1" -Provision
 
-# Restart using the usual elevated interactive startup task or desktop shortcut.
+# Restart once from the desktop shortcut (1.1.2+ repairs an existing login task).
 ```
 
 Provisioning creates a SHA-256/RSA code-signing certificate valid for three years

@@ -78,8 +78,21 @@ pub(super) fn configure(enable: bool) -> Result<(), String> {
                 let trigger: ILogonTrigger = task.Triggers()?.Create(TASK_TRIGGER_LOGON)?.cast()?;
                 trigger.SetUserId(&BSTR::from(&sid))?;
                 let action: IExecAction = task.Actions()?.Create(TASK_ACTION_EXEC)?.cast()?;
-                action.SetPath(&BSTR::from(exe.to_string_lossy().as_ref()))?;
-                action.SetArguments(&BSTR::from("--minimized"))?;
+                // Task Scheduler's direct CreateProcess launch rejects UIAccess
+                // executables (ERROR_ELEVATION_REQUIRED). Start-Process uses the
+                // Windows shell, which validates the signature and grants UIAccess.
+                let system = std::env::var_os("SystemRoot")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::path::PathBuf::from("C:\\Windows"));
+                let shell = system.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+                let literal = |path: &std::path::Path| {
+                    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+                };
+                action.SetPath(&BSTR::from(shell.to_string_lossy().as_ref()))?;
+                action.SetArguments(&BSTR::from(format!(
+                    "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"Start-Process -FilePath {} -ArgumentList '--minimized' -WorkingDirectory {} -WindowStyle Hidden\"",
+                    literal(&exe), literal(exe.parent().unwrap())
+                )))?;
                 action.SetWorkingDirectory(&BSTR::from(
                     exe.parent().unwrap().to_string_lossy().as_ref(),
                 ))?;

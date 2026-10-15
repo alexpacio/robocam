@@ -1,6 +1,6 @@
 ; Run scripts\package.ps1 to stage the application and compile this installer.
 #ifndef AppVersion
-  #define AppVersion "1.1.1"
+  #define AppVersion "1.1.2"
 #endif
 #ifndef SourceDir
   #error SourceDir must name the staged application directory
@@ -55,12 +55,12 @@ Name: "{userprograms}\robocam\robocam"; Filename: "{app}\robocam.exe"; WorkingDi
 Name: "{userdesktop}\robocam"; Filename: "{app}\robocam.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
-Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Check: NotUpdating; Flags: runhidden waituntilterminated runascurrentuser
-Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Check: UIAccessReady; Flags: nowait postinstall skipifsilent
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup enable"; Tasks: autostart; Check: NotUpdating; Flags: shellexec runhidden waituntilterminated runascurrentuser
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; Tasks: not autostart; Check: NotUpdating; Flags: shellexec runhidden waituntilterminated runascurrentuser
+Filename: "{app}\robocam.exe"; Description: "Launch robocam"; Check: UIAccessReady; Flags: shellexec nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; RunOnceId: "RemoveStartupTask"; Flags: runhidden waituntilterminated
+Filename: "{app}\robocam.exe"; Parameters: "--configure-startup disable"; RunOnceId: "RemoveStartupTask"; Flags: shellexec runhidden waituntilterminated
 
 [Code]
 var

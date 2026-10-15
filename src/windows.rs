@@ -419,6 +419,14 @@ pub fn run() {
             CloseHandle(single);
             return;
         }
+        // Migrate existing direct-executable login tasks after an update or
+        // machine-local UIAccess provisioning. Keep disabled startup disabled.
+        if !dry_run
+            && startup::enabled()
+            && let Err(error) = startup::configure(true)
+        {
+            eprintln!("Could not refresh login startup: {error}");
+        }
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         TASKBAR_CREATED.with(|message| {
             message.set(RegisterWindowMessageW(wide_raw("TaskbarCreated").as_ptr()))

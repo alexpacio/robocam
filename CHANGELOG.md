@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.2 - 2026-10-15
+
+- Fixed login startup for UIAccess-enabled installations. Task Scheduler cannot
+  start a UIAccess executable directly and returned error 740. The elevated
+  interactive task now launches through the Windows shell so Windows validates
+  the signature and grants UIAccess. The launcher stays hidden and uses the
+  existing startup and profile preferences.
+- Installer startup configuration, post-install launch and uninstall cleanup
+  also use the Windows shell to support UIAccess executables.
+- Normal launches migrate an existing enabled Robocam login task, including after
+  automatic updates or local UIAccess provisioning. Disabled startup stays off.
+- Verified on ROBO-PC that head-controlled movement and clicks continue while
+  SketchUp has a foreground Windows Ghost window with UIAccess enabled.
+- Upgrade note: 1.1.1 users should launch Robocam once from its shortcut or update
+  to 1.1.2 to repair the login task. Profiles and machine signing keys are retained.
+
 ## 1.1.1 - 2026-10-15
 
 - Added optional machine-local UIAccess provisioning for Robocam installed under
