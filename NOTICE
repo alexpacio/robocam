@@ -17,6 +17,3 @@ are separately licensed proprietary components.
 See THIRD_PARTY_NOTICES.md and the licenses directory for component attribution,
 original license texts, disclaimers and dependency license references.
 No endorsement by Intel, Microsoft or any other dependency author is implied.
-
-The license change in 0.8.1 does not revoke the licenses granted for earlier
-GPL-3.0-or-later releases.

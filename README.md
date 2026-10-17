@@ -271,10 +271,9 @@ See [packaging](docs/packaging.md) and [behavior and verification](docs/behavior
 
 ## License and disclaimers
 
-Robocam's original code is licensed under [Apache License 2.0](LICENSE), starting
-with 0.8.1. Commercial use and incorporation into closed-source products are
-permitted subject to the license terms. Earlier GPL releases retain their
-original license grants. See [NOTICE](NOTICE) for attribution.
+Robocam's original code is licensed under [Apache License 2.0](LICENSE).
+Commercial use and incorporation into closed-source products are permitted
+subject to the license terms. See [NOTICE](NOTICE) for attribution.
 
 Except as required by applicable law or agreed in writing, Robocam is supplied
 "AS IS", without warranties or conditions of any kind, express or implied.

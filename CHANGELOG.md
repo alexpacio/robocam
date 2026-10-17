@@ -116,9 +116,9 @@
 
 ## 0.8.1 - 2026-10-14
 
-- Relicensed Robocam's original code under Apache License 2.0 to allow broad
-  reuse, including proprietary products. Earlier GPL releases retain their
-  original license grants; third-party components retain their separate terms.
+- Robocam's original code is licensed under Apache License 2.0, allowing broad
+  reuse, including proprietary products; third-party components retain their
+  separate terms.
 - Identify Alessandro Bolletta as Robocam's author in
   application notices, Cargo metadata, Windows resources and the installer.
 - Added in-app Licenses and disclaimers and Open dependency licenses commands,
