@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4 - 2026-10-17
+
+- The Windows build and release pipeline now runs only when a version tag
+  (`vX.Y.Z`) is pushed. Ordinary pushes, pull requests and manual dispatches no
+  longer start it; run the checks locally before tagging.
+- Repository instructions now record the tag-only pipeline rule and require local
+  format, lint and test runs before pushing a release tag.
+
 ## 1.1.3 - 2026-10-15
 
 - Startup update checks run in the background, including after an update restart.

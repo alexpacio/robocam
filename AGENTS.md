@@ -29,6 +29,11 @@ documentation, configuration, and build or release automation.
 - Before tagging, ensure the commit is on `main`, required checks pass, and the
   tag, package version, installer version, and changelog entry agree.
 - Do not move or overwrite published release tags.
+- The Windows build and release pipeline must trigger only on pushes of version
+  tags matching `vX.Y.Z`. Do not add triggers for branch pushes, pull requests,
+  or manual dispatch; any other CI workflow must be requested explicitly.
+- Because no pipeline runs before tagging, run formatting, lint, and tests
+  locally before pushing a release tag.
 
 ## Publish installable GitHub Releases
 
