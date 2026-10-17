@@ -5,6 +5,10 @@ OpenCV face detection and optical-flow tracking. Camera images stay on the PC.
 
 Author: **Alessandro Bolletta**.
 
+## Live session example
+
+![A live Robocam session controlling the pointer by head movement](docs/images/live_session_video.webp)
+
 ## Install and start
 
 Download the installer from [GitHub Releases](https://github.com/alexpacio/robocam/releases/latest).
