@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.0 - 2026-11-26
+
+- The click bar's **Play** button now asks for confirmation before resuming
+  clicks, so an unintended dwell or click on it cannot start clicking again.
+  Confirm and Cancel can be selected by dwelling while clicks are paused; Cancel
+  or closing the dialog keeps clicks paused. Pausing from the bar is still
+  immediate, and **F11** and the main window's Play/Pause still resume without
+  asking (and close an open question).
+- Fixed switching profiles in **Configuration**. Selecting a profile from the
+  list re-applied the previously active profile, because the editable profile
+  box still showed the old name when the selection changed. Any saved profile
+  can now be selected and applied, and new profiles created with **Save as…**
+  can be selected later.
+- Fixed a crash in `comctl32.dll` when choosing a profile from the list. The
+  Configuration window was destroyed while its profile box was still handling
+  the click. Profile changes are now applied after the click has completed.
+- When a profile cannot be applied, an error dialog now names the profile and
+  the root cause: a failed settings save, a hotkey that cannot be registered,
+  or a camera or driver zoom failure reported while the camera restarts.
+- Fixed the fixed driver zoom not being applied on some cameras, such as the
+  Anker PowerConf C200. Their firmware streams unzoomed after every restart while
+  the driver still reports the previous zoom value, so Robocam skipped the write.
+  The zoom is now always written, through an adjacent value first, each time
+  the camera starts.
+- Settings, profiles and saved zoom levels are preserved on upgrade.
+
 ## 1.1.4 - 2026-10-17
 
 - The Windows build and release pipeline now runs only when a version tag

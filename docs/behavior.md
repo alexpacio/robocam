@@ -38,8 +38,12 @@ State is shown by the button face: mint with a teal marker when selected, a
 padlock badge when locked, and amber Play/Pause with dimmed click icons when paused.
 
 Pause disables desktop clicks, releases held buttons and cancels pending actions.
-Camera acquisition and head-driven pointer movement continue. Dwelling on Play
-still resumes clicking; the full-pause button remains reachable as well. Other
+Camera acquisition and head-driven pointer movement continue. Dwelling on the
+toolbar's Play opens a modeless confirmation; clicking resumes only after Confirm,
+which is dwell-reachable while clicks are paused. Cancel or closing it keeps clicks
+paused, and a repeated Play reuses the open question. Pausing from the toolbar is
+immediate; F11 and the main window's Play/Pause resume without asking and close
+an open toolbar question. The full-pause button remains reachable as well. Other
 toolbar dwell actions are suspended while click-only pause is active.
 Physical mouse actions remain available. The second main-window button, immediately
 right of click Play/Pause, asks for confirmation before stopping webcam movement and
@@ -206,7 +210,7 @@ also account for the measured footer. There is no ellipsis or tooltip-only text.
 1. Select a camera, save, restart, then verify that the same device is selected.
    Test two identically named devices, removal, reconnect, Refresh and Forget.
 2. Pause: camera frames and pointer movement continue; desktop clicks stop; Play
-   can still be activated by dwelling.
+   can still be activated by dwelling, and resumes only after Confirm.
 3. Test single/double/triple, middle/right, drag, scroll and temporary/locked modes.
    Pausing, losing reliable tracking or exiting must release held buttons.
 4. Test SketchUp on a group/component in the model viewport and cancel by switching

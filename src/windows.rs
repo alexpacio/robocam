@@ -29,6 +29,7 @@ use crate::{
     settings::{Profile, ROBO_PROFILE_NAME, Settings},
     vision::*,
 };
+use messages::Confirmation;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -53,6 +54,8 @@ const TRAY_MESSAGE: u32 = WM_APP + 1;
 const DEFERRED_DPI: u32 = WM_APP + 2;
 const DEFERRED_REDRAW: u32 = WM_APP + 5;
 const DEFERRED_PLACEMENT: u32 = WM_APP + 6;
+/// Applies `App::pending_profile` after the notifying control has returned.
+const APPLY_PROFILE: u32 = WM_APP + 7;
 const APPBAR_CALLBACK: u32 = WM_APP + 3;
 const APPBAR_REPOSITION: u32 = WM_APP + 4;
 const ENABLE: u16 = 101;
@@ -249,6 +252,10 @@ struct App {
     zoom_query: Option<Receiver<(CameraPreference, Result<cameras::DriverZoom, String>)>>,
     zoom_capabilities: Option<(CameraPreference, Result<cameras::DriverZoom, String>)>,
     driver_zoom_state: Option<Result<cameras::DriverZoom, String>>,
+    /// Profile whose camera start is still unconfirmed; its failure opens a dialog.
+    profile_check: Option<String>,
+    /// Profile to activate and whether to reopen Configuration; see APPLY_PROFILE.
+    pending_profile: Option<(String, bool)>,
     status: String,
     last_status: String,
     controls: Vec<(HWND, u8)>,
@@ -516,6 +523,8 @@ pub fn run() {
             zoom_query: None,
             zoom_capabilities: None,
             driver_zoom_state: None,
+            profile_check: None,
+            pending_profile: None,
             status: "Starting camera…".into(),
             last_status: String::new(),
             controls: Vec::new(),
@@ -848,6 +857,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             | DEFERRED_DPI
             | APPBAR_CALLBACK
             | APPBAR_REPOSITION
+            | APPLY_PROFILE
             | WM_NCDESTROY
             | WM_LBUTTONDOWN
             | WM_LBUTTONUP
@@ -878,7 +888,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return 0;
             }
             WM_SIZE | WM_COMMAND | WM_HOTKEY | WM_CLOSE | DEFERRED_DPI | APPBAR_CALLBACK
-            | APPBAR_REPOSITION => {
+            | APPBAR_REPOSITION | APPLY_PROFILE => {
                 PostMessageW(hwnd, msg, wp, lp);
                 return 0;
             }
@@ -927,6 +937,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_COMMAND => {
             app.command(hwnd, (wp & 0xffff) as u16, ((wp >> 16) & 0xffff) as u16);
+            0
+        }
+        APPLY_PROFILE => {
+            if let Some((name, reopen_options)) = app.pending_profile.take() {
+                app.apply_profile(name, reopen_options);
+            }
             0
         }
         WM_TIMER if hwnd == app.hwnd => {
@@ -1085,6 +1101,26 @@ unsafe fn text(hwnd: HWND) -> String {
     let mut buffer = vec![0u16; GetWindowTextLengthW(hwnd) as usize + 1];
     let n = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
     String::from_utf16_lossy(&buffer[..n as usize])
+}
+/// The selected list item of a combo box. During CBN_SELCHANGE the edit text
+/// of a CBS_DROPDOWN box still holds the previous value, so it cannot be used.
+unsafe fn combo_selection(combo: HWND) -> Option<String> {
+    let index = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if index < 0 {
+        return None;
+    }
+    let length = SendMessageW(combo, CB_GETLBTEXTLEN, index as usize, 0);
+    if length < 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    let copied = SendMessageW(
+        combo,
+        CB_GETLBTEXT,
+        index as usize,
+        buffer.as_mut_ptr() as isize,
+    );
+    (copied >= 0).then(|| String::from_utf16_lossy(&buffer[..copied as usize]))
 }
 unsafe fn set_text(hwnd: HWND, value: &str) {
     SetWindowTextW(hwnd, wide(value).as_ptr());
@@ -1920,6 +1956,8 @@ impl App {
                     }
                 }
                 VisionEvent::Frame(frame) => {
+                    // The zoom is applied before the first frame is delivered.
+                    self.profile_check = None;
                     self.frames_received += 1;
                     self.watchdog.frame(
                         time,
@@ -1956,6 +1994,9 @@ impl App {
                 VisionEvent::Zoom(zoom) => self.driver_zoom_state = Some(zoom),
                 VisionEvent::Error(error) => {
                     self.watchdog.camera_failed();
+                    if let Some(name) = self.profile_check.take() {
+                        self.report_profile_error(&name, &error);
+                    }
                     self.status = error;
                     self.release_all();
                     self.last_frame = 0;
@@ -2296,12 +2337,21 @@ impl App {
     }
 
     unsafe fn apply_pause_answer(&mut self) {
-        if messages::take_pause_answer().is_some_and(|target| target != self.full_paused) {
-            self.toggle_full_pause();
+        match messages::take_pause_answer() {
+            Some(Confirmation::FullPause(target)) if target != self.full_paused => {
+                self.toggle_full_pause();
+            }
+            // Ignore a stale answer if clicks were resumed another way meanwhile.
+            Some(Confirmation::ResumeClicks) if !self.enabled => self.toggle(),
+            _ => {}
         }
     }
 
     unsafe fn toggle(&mut self) {
+        // Resuming by hotkey or the main window answers an open bar question.
+        if !self.enabled && messages::pending_confirmation() == Some(Confirmation::ResumeClicks) {
+            messages::cancel_pause_confirmation();
+        }
         self.enabled = !self.enabled;
         self.release_all();
         self.motion.reset();
@@ -2316,8 +2366,15 @@ impl App {
         }
     }
     unsafe fn register_hotkeys(&self) {
+        for problem in self.register_hotkeys_checked() {
+            message(self.hwnd, &problem);
+        }
+    }
+    /// Registers the active profile's hotkeys and returns the failures.
+    unsafe fn register_hotkeys_checked(&self) -> Vec<String> {
+        let mut problems = Vec::new();
         if self.dry_run {
-            return;
+            return problems;
         }
         for id in 1..=8 {
             UnregisterHotKey(self.hwnd, id);
@@ -2330,13 +2387,16 @@ impl App {
         ] {
             UnregisterHotKey(self.hwnd, id);
             if key != 0 && RegisterHotKey(self.hwnd, id, MOD_NOREPEAT, key) == 0 {
-                message(
-                    self.hwnd,
-                    &format!(
-                        "Hotkey {} is already in use. Choose another key in Configuration.",
-                        key
-                    ),
-                );
+                let error = std::io::Error::last_os_error();
+                problems.push(format!(
+                    "Hotkey {} could not be registered ({error}). Choose another key in Configuration.",
+                    // Profile hotkeys are F1–F24 (VK_F1 = 0x70).
+                    if (0x70..=0x87).contains(&key) {
+                        format!("F{}", key - 0x6F)
+                    } else {
+                        format!("{key:#x}")
+                    }
+                ));
             }
         }
         if self.config.profile().arrow_sensitivity {
@@ -2344,6 +2404,7 @@ impl App {
                 RegisterHotKey(self.hwnd, id, MOD_NOREPEAT, key as u32);
             }
         }
+        problems
     }
     unsafe fn tray(&self, operation: u32) {
         let mut icon: NOTIFYICONDATAW = zeroed();
@@ -2407,6 +2468,80 @@ impl App {
         placement::ensure(self.hwnd);
         BringWindowToTop(self.hwnd);
         SetForegroundWindow(self.hwnd);
+    }
+
+    /// The bar's Play pauses clicks at once but asks before resuming them.
+    unsafe fn verify_bar_resume_confirmation(&mut self) {
+        let (enabled, full_paused) = (self.enabled, self.full_paused);
+        self.full_paused = false;
+        self.enabled = true;
+        self.command(self.bar, 210, 0);
+        assert!(!self.enabled, "bar Play did not pause clicks");
+        assert!(messages::pause_window().is_null(), "pausing asked");
+        self.command(self.bar, 210, 0);
+        assert!(
+            !self.enabled,
+            "bar Play resumed clicks without confirmation"
+        );
+        let question = messages::pause_window();
+        assert!(!question.is_null(), "bar Play did not ask before resuming");
+        assert_eq!(
+            messages::pending_confirmation(),
+            Some(Confirmation::ResumeClicks)
+        );
+        self.command(self.bar, 210, 0);
+        assert_eq!(messages::pause_window(), question, "Play asked twice");
+        SendMessageW(question, WM_COMMAND, 2, 0);
+        self.apply_pause_answer();
+        assert!(!self.enabled, "Cancel resumed clicks");
+        self.command(self.bar, 210, 0);
+        SendMessageW(messages::pause_window(), WM_CLOSE, 0, 0);
+        self.apply_pause_answer();
+        assert!(!self.enabled, "closing the question resumed clicks");
+        self.command(self.bar, 210, 0);
+        SendMessageW(messages::pause_window(), WM_COMMAND, 1, 0);
+        self.apply_pause_answer();
+        assert!(self.enabled, "Confirm did not resume clicks");
+        // Resuming another way (F11, main window) closes a stale question.
+        self.command(self.bar, 210, 0);
+        self.command(self.bar, 210, 0);
+        self.toggle();
+        assert!(self.enabled && messages::pause_window().is_null());
+        // Confirm stays reachable by head dwell while clicks are paused.
+        self.toggle();
+        self.command(self.bar, 210, 0);
+        let question = messages::pause_window();
+        SetWindowPos(
+            question,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        let mut confirm: RECT = zeroed();
+        GetWindowRect(GetDlgItem(question, 1), &mut confirm);
+        let centre = (
+            (confirm.left + confirm.right) / 2,
+            (confirm.top + confirm.bottom) / 2,
+        );
+        self.hover_id = 0;
+        let start = now();
+        self.pointer_actions(start, MotionOutput::default(), centre, Some(centre));
+        assert!(!self.enabled);
+        self.pointer_actions(
+            start + self.config.profile().click.dwell_ms,
+            MotionOutput::default(),
+            centre,
+            Some(centre),
+        );
+        assert!(self.enabled, "dwell on Confirm did not resume clicks");
+        assert!(messages::pause_window().is_null());
+        self.hover_id = 0;
+        self.hover_done = false;
+        self.enabled = enabled;
+        self.full_paused = full_paused;
     }
 
     unsafe fn verify_bar_lifecycle(&mut self) {
@@ -2532,11 +2667,7 @@ impl App {
             assert!(GetDlgItem(self.bar, i32::from(id)).is_null());
         }
         assert_eq!(GetDlgCtrlID(GetWindow(self.bar, GW_CHILD)), 210);
-        let enabled = self.enabled;
-        self.command(self.bar, 210, 0);
-        assert_eq!(self.enabled, !enabled);
-        self.command(self.bar, 210, 0);
-        assert_eq!(self.enabled, enabled);
+        self.verify_bar_resume_confirmation();
 
         // Simulate a stalled timer: a timed press must not collapse into an
         // immediate down/up pair, and pausing must still release it at once.
@@ -2785,6 +2916,9 @@ impl App {
             return;
         }
         match id {
+            // The click bar's Play asks first, so a stray dwell or click on it
+            // cannot resume clicking. Pausing from it stays immediate.
+            210 if !self.enabled => messages::confirm_resume_clicks(self.bar),
             ENABLE | 210 | 201 => self.toggle(),
             212 => messages::confirm_pause(self.hwnd, !self.full_paused),
             OPTIONS => self.open_options(),
@@ -2861,28 +2995,14 @@ impl App {
                 self.show_options_page();
             }
             PROFILE if notification == CBN_SELCHANGE as u16 => {
-                let name = text(GetDlgItem(source, PROFILE as i32));
-                if self.config.profiles.contains_key(&name) {
-                    self.release_all();
-                    self.config.active_profile = name;
-                    self.save();
-                    self.register_hotkeys();
-                    self.start_camera();
-                    self.create_bar();
-                    self.destroy_owned(self.options);
-                    self.options = null_mut();
-                    self.open_options();
+                if let Some(name) = combo_selection(GetDlgItem(source, PROFILE as i32)) {
+                    self.request_profile(name, true);
                 }
             }
             SAVE => {
                 if self.read_options() {
-                    self.save();
-                    self.register_hotkeys();
-                    self.create_bar();
-                    self.start_camera();
-                    self.destroy_owned(self.options);
-                    self.options = null_mut();
-                    self.controls.clear();
+                    let name = self.config.active_profile.clone();
+                    self.request_profile(name, false);
                 }
             }
             CANCEL => {
@@ -2915,14 +3035,7 @@ impl App {
                 let new_profile = self.config.profile().clone();
                 *self.config.profile_mut() = original;
                 self.config.profiles.insert(name.clone(), new_profile);
-                self.config.active_profile = name;
-                self.save();
-                self.register_hotkeys();
-                self.create_bar();
-                self.start_camera();
-                self.destroy_owned(self.options);
-                self.options = null_mut();
-                self.open_options();
+                self.request_profile(name, true);
             }
             DELETE_PROFILE => {
                 if self.config.active_profile == ROBO_PROFILE_NAME {
@@ -2936,17 +3049,15 @@ impl App {
                     message(self.options, "Keep at least one profile.");
                     return;
                 }
+                // Release input while the deleted profile's settings still exist.
+                self.release_all();
                 let name = self.config.active_profile.clone();
                 self.config.profiles.remove(&name);
-                self.config.active_profile = self.config.profiles.keys().next().unwrap().clone();
-                self.save();
-                self.release_all();
-                self.start_camera();
-                self.create_bar();
-                self.register_hotkeys();
-                self.destroy_owned(self.options);
-                self.options = null_mut();
-                self.open_options();
+                // Code such as the timer reads the active profile before the
+                // deferred apply runs, so it must name an existing profile now.
+                let next = self.config.profiles.keys().next().unwrap().clone();
+                self.config.active_profile = next.clone();
+                self.request_profile(next, true);
             }
             CAMERA_SETTINGS => {
                 if let Some(camera) = &self.camera {
@@ -2969,6 +3080,72 @@ impl App {
             NEXT => self.wizard_next(),
             _ => {}
         }
+    }
+
+    /// Defers `apply_profile`: it destroys the Configuration window, whose
+    /// controls are still processing the notification that requested it.
+    /// Destroying a combo box from its own CBN_SELCHANGE crashes in comctl32.
+    unsafe fn request_profile(&mut self, name: String, reopen_options: bool) {
+        self.pending_profile = Some((name, reopen_options));
+        PostMessageW(self.hwnd, APPLY_PROFILE, 0, 0);
+    }
+
+    /// Activates `name` and restarts everything that depends on the profile.
+    /// Synchronous failures are reported immediately; camera and zoom failures
+    /// arrive from the vision worker and are reported by `report_profile_error`.
+    unsafe fn apply_profile(&mut self, name: String, reopen_options: bool) {
+        if !self.config.profiles.contains_key(&name) {
+            self.report_profile_error(&name, "This profile does not exist.");
+            return;
+        }
+        self.release_all();
+        self.config.active_profile = name.clone();
+        let mut problems = Vec::new();
+        if !self.dry_run
+            && let Err(error) = self.config.save()
+        {
+            problems.push(format!("Could not save settings: {error}"));
+        }
+        problems.extend(self.register_hotkeys_checked());
+        self.create_bar();
+        self.start_camera();
+        self.profile_check = (!self.dry_run).then(|| name.clone());
+        self.destroy_owned(self.options);
+        self.options = null_mut();
+        self.controls.clear();
+        if reopen_options {
+            self.open_options();
+        }
+        if !problems.is_empty() {
+            self.report_profile_error(
+                &name,
+                &problems.join(
+                    "
+
+",
+                ),
+            );
+        }
+    }
+
+    unsafe fn report_profile_error(&self, name: &str, cause: &str) {
+        let owner = if self.options.is_null() {
+            self.hwnd
+        } else {
+            self.options
+        };
+        messages::show_verbatim(
+            owner,
+            &crate::i18n::translate("robocam — profile error"),
+            &format!(
+                "{} \"{name}\".
+
+{} {}",
+                crate::i18n::translate("Could not apply profile"),
+                crate::i18n::translate("Cause:"),
+                crate::i18n::translate(cause),
+            ),
+        );
     }
 
     unsafe fn open_options(&mut self) {
@@ -3533,8 +3710,8 @@ impl App {
             p.motion.reverse_x = self.checked(405);
             p.motion.reverse_y = self.checked(406);
             p.motion.restricted_workspace = self.checked(407);
-            for i in 0..4 {
-                p.motion.margins_percent[i] = self.number(408 + i as u16, 0, 50)? as u8;
+            for (id, margin) in (408..).zip(&mut p.motion.margins_percent) {
+                *margin = self.number(id, 0, 50)? as u8;
             }
             p.motion.wrap_pointer = self.checked(412);
             p.click.mode = match self.selected(420) {
@@ -3550,10 +3727,8 @@ impl App {
             p.black_cursor_on_click = self.checked(426);
             p.pause_on_mouse_ms = self.number(427, 0, 10000)?;
             p.click.press_ms = Some(self.number(428, 0, 1000)?);
-            for i in 0..4 {
-                p.click.gestures[i] = ClickAction::ALL[self
-                    .selected(429 + i as u16)
-                    .min(ClickAction::ALL.len() - 1)];
+            for (id, gesture) in (429..).zip(&mut p.click.gestures) {
+                *gesture = ClickAction::ALL[self.selected(id).min(ClickAction::ALL.len() - 1)];
             }
             p.camera = self
                 .camera_choices

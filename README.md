@@ -58,7 +58,10 @@ driver's setting alone.
 
 Move your head to move the pointer and stop over a target to click. **Pause stops
 screen clicks only**: video and head-driven pointer movement continue. Dwell on
-**Play** to resume. In the **main window**, the second button, immediately right of
+**Play** in the toolbar to resume, then confirm in the dialog that opens (dwell or click
+**Confirm**); **Cancel** or closing it keeps clicks paused, so a stray dwell or click on
+Play cannot resume clicking. Pausing from the toolbar is immediate, and **F11** and the
+main window's Play/Pause still resume without asking. In the **main window**, the second button, immediately right of
 Play/Pause, stops both movement and clicks after a confirmation dialog. Head control
 remains usable until you confirm; Cancel leaves it unchanged. Camera preview continues,
 held buttons are released and pending clicks are cancelled. Resume with a physical
@@ -74,7 +77,7 @@ space so maximized windows do not overlap it. With SketchUp buttons enabled, the
 
 | Position | Control | Action |
 | --- | --- | --- |
-| 1 | Play/pause clicks | Toggle clicks while head movement continues. |
+| 1 | Play/pause clicks | Pause clicks while head movement continues; resuming asks for confirmation. |
 | 2 | Left click | One left click. |
 | 3 | Double click | Standard double left click. |
 | 4 | SketchUp cube 2 | Select tool, then paced double click to edit a group/component. |

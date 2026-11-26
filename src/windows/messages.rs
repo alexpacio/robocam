@@ -3,17 +3,38 @@ use super::*;
 
 const CLASS: &str = "robocam.notice";
 
-thread_local! {
-    static PAUSE_WINDOW: std::cell::Cell<HWND> = const { std::cell::Cell::new(null_mut()) };
-    static PAUSE_ANSWER: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+/// What a confirmation window asks; Confirm stores it as the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Confirmation {
+    /// Enter (true) or leave (false) the full pause of movement and clicks.
+    FullPause(bool),
+    /// Resume clicks after they were paused, from the click bar's Play button.
+    ResumeClicks,
 }
 
+thread_local! {
+    static PAUSE_WINDOW: std::cell::Cell<HWND> = const { std::cell::Cell::new(null_mut()) };
+    static PAUSE_ANSWER: std::cell::Cell<Option<Confirmation>> = const { std::cell::Cell::new(None) };
+}
+
+/// The open confirmation window, if any. Its buttons stay dwell-clickable
+/// while clicks are paused.
 pub(super) fn pause_window() -> HWND {
     PAUSE_WINDOW.with(|window| window.get())
 }
 
-pub(super) fn take_pause_answer() -> Option<bool> {
+pub(super) fn take_pause_answer() -> Option<Confirmation> {
     PAUSE_ANSWER.with(|answer| answer.take())
+}
+
+/// The question asked by the open confirmation window.
+pub(super) unsafe fn pending_confirmation() -> Option<Confirmation> {
+    let window = pause_window();
+    if window.is_null() {
+        return None;
+    }
+    let notice = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Notice;
+    notice.as_ref().and_then(|notice| notice.pause_target)
 }
 
 pub(super) unsafe fn cancel_pause_confirmation() {
@@ -25,28 +46,40 @@ pub(super) unsafe fn cancel_pause_confirmation() {
 }
 
 pub(super) unsafe fn confirm_pause(owner: HWND, target: bool) {
-    let existing = pause_window();
-    if !existing.is_null() {
-        SetForegroundWindow(existing);
-        return;
-    }
-    take_pause_answer();
-    show_notice(
+    confirm(
         owner,
         if target {
             "Pause webcam movement and clicks?\n\nHead control stays active until you confirm. To resume afterwards, use the full-pause hotkey or a physical mouse."
         } else {
             "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained."
         },
-        Some(target),
-        true,
-        "robocam",
+        Confirmation::FullPause(target),
     );
+}
+
+/// Asks before the click bar's Play button resumes clicks, so that an
+/// unintended dwell or click on it does not start clicking again.
+pub(super) unsafe fn confirm_resume_clicks(owner: HWND) {
+    confirm(
+        owner,
+        "Resume clicks?\n\nClicks stay paused until you confirm. Afterwards, stopping the pointer over a target clicks it again.",
+        Confirmation::ResumeClicks,
+    );
+}
+
+unsafe fn confirm(owner: HWND, content: &str, question: Confirmation) {
+    let existing = pause_window();
+    if !existing.is_null() {
+        SetForegroundWindow(existing);
+        return;
+    }
+    take_pause_answer();
+    show_notice(owner, content, Some(question), true, "robocam");
 }
 
 struct Notice {
     font: HFONT,
-    pause_target: Option<bool>,
+    pause_target: Option<Confirmation>,
 }
 
 pub(super) unsafe fn show(owner: HWND, content: &str) {
@@ -60,7 +93,7 @@ pub(super) unsafe fn show_verbatim(owner: HWND, title: &str, content: &str) {
 unsafe fn show_notice(
     owner: HWND,
     content: &str,
-    pause_target: Option<bool>,
+    pause_target: Option<Confirmation>,
     translate: bool,
     title: &str,
 ) {

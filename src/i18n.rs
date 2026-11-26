@@ -162,6 +162,9 @@ fn static_italian(text: &str) -> Option<&'static str> {
         "Resume webcam movement and clicks?\n\nThe previous click-pause setting will be retained." => {
             "Riprendere movimento e clic dalla webcam?\n\nL'impostazione precedente della pausa dei clic verrà mantenuta."
         }
+        "Resume clicks?\n\nClicks stay paused until you confirm. Afterwards, stopping the pointer over a target clicks it again." => {
+            "Riprendere i clic?\n\nI clic restano in pausa fino alla conferma. Dopo, fermando il puntatore su un elemento lo si clicca di nuovo."
+        }
         "Movement and clicks paused — use the hotkey or main window button" => {
             "Movimento e clic in pausa — usa il tasto rapido o il pulsante nella finestra principale"
         }
@@ -372,6 +375,10 @@ fn static_italian(text: &str) -> Option<&'static str> {
             "Il profilo esiste già. Inserisci un nuovo nome e scegli Salva come."
         }
         "Keep at least one profile." => "Deve rimanere almeno un profilo.",
+        "robocam — profile error" => "robocam — errore del profilo",
+        "Could not apply profile" => "Impossibile applicare il profilo",
+        "Cause:" => "Causa:",
+        "This profile does not exist." => "Questo profilo non esiste.",
         "Choose a camera index of zero or greater." => {
             "Scegli un indice della videocamera maggiore o uguale a zero."
         }

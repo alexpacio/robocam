@@ -151,7 +151,9 @@ without opening the camera or interface.
 `--list-cameras <path>` writes device names, stable identities and backend indices.
 `--camera-name "Anker PowerConf C200" --camera-zoom-report <path>` reads native
 driver zoom without starting capture. Adding `--camera-zoom-increments <count>`
-conditionally sets it; unsupported/out-of-range values fail explicitly.
+writes it, through an adjacent value first, even when the driver already reports
+that value (some cameras reset the zoom on each stream start while the driver keeps
+reporting the last one); unsupported/out-of-range values fail explicitly.
 `--capture-ui <directory>` exports BMP screenshots of robocam's native windows,
 without camera capture, input injection or settings writes. Convert these losslessly
 to PNG for README; it never captures the surrounding desktop or webcam frames.

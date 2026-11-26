@@ -29,6 +29,16 @@ impl DriverZoom {
         }
         Ok((i64::from(self.minimum) + i64::from(increments) * i64::from(self.step)) as i32)
     }
+    /// An adjacent in-range driver value, written before `target` so that the
+    /// device always observes a change. None when the range has one value.
+    pub fn nudge_from(&self, target: i32) -> Option<i32> {
+        let step = i64::from(self.step.max(1));
+        let target = i64::from(target);
+        [target - step, target + step]
+            .into_iter()
+            .find(|value| (i64::from(self.minimum)..=i64::from(self.maximum)).contains(value))
+            .map(|value| value as i32)
+    }
 }
 
 /// Uses IAMCameraControl on the selected physical device. No image resize/crop.
@@ -378,12 +388,20 @@ mod native {
                             .map_err(|e| e.to_string())?;
                         if let Some(increments) = increments {
                             let target = zoom.value_at(increments)?;
-                            if zoom.current != target {
+                            // The reported value can be stale: e.g. the Anker
+                            // PowerConf C200 keeps reporting the last zoom while
+                            // its firmware streams unzoomed after each restart,
+                            // and ignores writes of the reported value. Always
+                            // write a neighbouring value first, then the target.
+                            for value in [zoom.nudge_from(target), Some(target)]
+                                .into_iter()
+                                .flatten()
+                            {
                                 control
-                                    .Set(CameraControl_Zoom.0, target, CameraControl_Flags_Manual.0)
+                                    .Set(CameraControl_Zoom.0, value, CameraControl_Flags_Manual.0)
                                     .map_err(|e| format!("Could not apply driver zoom: {e}"))?;
-                                zoom.applied = true;
                             }
+                            zoom.applied = true;
                         }
                         control
                             .Get(CameraControl_Zoom.0, &mut zoom.current, &mut zoom.flags)
@@ -509,6 +527,35 @@ mod tests {
         assert_eq!(zoom.value_at(4), Ok(10));
         zoom.step = 0;
         assert!(zoom.value_at(0).is_err());
+    }
+
+    #[test]
+    fn driver_zoom_nudge_stays_in_range_and_differs_from_target() {
+        let zoom = DriverZoom {
+            minimum: 100,
+            maximum: 400,
+            step: 1,
+            default: 100,
+            current: 388,
+            flags: 2,
+            applied: false,
+        };
+        assert_eq!(zoom.nudge_from(388), Some(387));
+        assert_eq!(zoom.nudge_from(100), Some(101));
+        assert_eq!(zoom.nudge_from(400), Some(399));
+        let stepped = DriverZoom {
+            minimum: -10,
+            maximum: 10,
+            step: 5,
+            ..zoom.clone()
+        };
+        assert_eq!(stepped.nudge_from(-10), Some(-5));
+        let fixed = DriverZoom {
+            minimum: 7,
+            maximum: 7,
+            ..zoom
+        };
+        assert_eq!(fixed.nudge_from(7), None);
     }
 
     #[cfg(windows)]
